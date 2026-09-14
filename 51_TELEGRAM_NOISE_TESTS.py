@@ -17,4 +17,4 @@ with tempfile.TemporaryDirectory() as d:
     assert len(b._opportunity_messages([base],1000))==1
     changed=dict(base,score=76)
     assert b._opportunity_messages([changed],1120)==[], 'score changes must not bypass cooldown'
-print('V5.10.2 TELEGRAM ANTI-SPAM TESTS OK')
+print('V5.11.0 TELEGRAM ANTI-SPAM TESTS OK')

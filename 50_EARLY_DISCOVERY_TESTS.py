@@ -18,4 +18,4 @@ assert found and found[0].get('chain_id')=='solana' and 'gecko_new_pool' in foun
 assert not any(x.get('address')==stable_addr for x in items)
 api.dex_pair=lambda *args,**kwargs: None
 rank=api.discovery_rank(found[0]); assert rank and rank.get('liquidity',0)>0 and rank.get('pair_created_at')==found[0].get('pair_created_at')
-print('V5.10.2 EARLY DISCOVERY TESTS OK')
+print('V5.11.0 EARLY DISCOVERY TESTS OK')

@@ -1,0 +1,17 @@
+{
+  "package": "RH_BOT_V5_11_0_LAUNCH_RADAR_COMPLETE",
+  "version": "5.11.0",
+  "main": "03_rh_chain_bot_v4.py",
+  "config_template": "01_config.example.json",
+  "mode": "DEMO",
+  "live_enabled": false,
+  "early_listing": {
+    "max_age_minutes": 30,
+    "deep_scan_reserve": 4,
+    "discovery_pool_per_scan": 160,
+    "demo_auto_entry": true,
+    "hard_safety_vetoes": true
+  },
+  "reports": ["today", "weekly", "monthly", "all_time", "early_listings", "opportunities", "risk", "demo_positions", "live_status", "settings"],
+  "tests": ["50_TESTS.py", "50_EARLY_DISCOVERY_TESTS.py", "51_TELEGRAM_NOISE_TESTS.py", "52_V5_11_0_FEATURE_TESTS.py"]
+}

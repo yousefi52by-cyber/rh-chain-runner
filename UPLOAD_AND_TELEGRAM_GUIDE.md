@@ -1,4 +1,4 @@
-# V5.10.1 Upload + Telegram
+# V5.11.0 Upload + Telegram
 
 ## Private bot repository
 Upload/replace these files at repository root:
@@ -9,7 +9,7 @@ Upload/replace these files at repository root:
 - 51_TELEGRAM_NOISE_TESTS.py
 - 50_CHANGELOG.md
 - 07_TELEGRAM_STRUCTURE.md
-- README_V5.10.1.txt
+- README_V5.11.0.txt
 - UPLOAD_AND_TELEGRAM_GUIDE.md
 - .github/workflows/SCANNER_WORKFLOW.yml
 
@@ -26,7 +26,7 @@ No new secret names are required. Keep:
 - TELEGRAM_CHAT_ID
 - BLOCKSCOUT_API_KEY
 
-The existing public runner workflow calls the private bot with `--once`. In V5.10.1, `--once` also processes a bounded batch of Telegram updates after the scan. This makes Telegram usable without a permanent server; command response latency is normally up to one scheduled runner interval.
+The existing public runner workflow calls the private bot with `--once`. In V5.11.0, `--once` also processes a bounded batch of Telegram updates after the scan. This makes Telegram usable without a permanent server; command response latency is normally up to one scheduled runner interval.
 
 ## Telegram commands
 /start or /menu

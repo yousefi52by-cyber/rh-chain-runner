@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Global Multi-Asset Trader V5.10.1. Opportunity-first scanner/demo/Telegram controller.
+"""Global Multi-Asset Trader V5.11.0. Opportunity-first scanner/demo/Telegram controller.
 Live trading is intentionally locked; no private key is accepted or stored.
 """
 import json, os, re, time, uuid, logging, threading, base64, hashlib, hmac, struct, math
@@ -14,7 +14,7 @@ GECKO='https://api.geckoterminal.com/api/v2'
 BLOCKSCOUT='https://api.blockscout.com/4663/api/v2'
 TG='https://api.telegram.org/bot{}/{}'
 CHAIN='robinhood'; CHAIN_ID=4663
-UA='Global-Trader-V5.10.1/1.0'
+UA='Global-Trader-V5.11.0/1.0'
 # DexScreener chain IDs -> GeckoTerminal network slugs for deep technical OHLCV.
 GECKO_NETWORKS={
     'ethereum':'eth','solana':'solana','bsc':'bsc','base':'base','arbitrum':'arbitrum','polygon':'polygon_pos',
@@ -44,7 +44,7 @@ def atomic_json(path, obj):
 
 def default_state(cfg):
     d=datetime.now(timezone.utc).date().isoformat()
-    return {'version':'5.10.2','state_schema':'5.10.2','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
+    return {'version':'5.11.0','state_schema':'5.11.0','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
       'watchlist':[],'manual_watchlist':[],'daily_watch':[],'daily_watch_date':d,'telegram_offset':0,'last_scan_universe':{},'entry_cooldowns':{},
       'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,
       'demo':{'cash':float(cfg['risk']['demo_start_balance_usd']),'positions':{},'realized_pnl':0.0,'trades':[]},
@@ -489,7 +489,20 @@ class API:
             elif mc>0: mc_pts=max(1.0,20-12*min(1.0,abs(mc-max(min(mc,mc_max),mc_min))/max(mc_min,1)))
             else: mc_pts=0
             liq_pts=20*min(1.5,liq/max(liq_target,1))/1.5 if liq>0 else 0; vol_pts=25*min(1.5,vol/max(vol_target,1))/1.5 if vol>0 else 0; flow_pts=15*min(1.5,max(0,ratio))/1.5; momentum=max(0,min(20,10+(min(100,max(-50,ch1))/10)))
-            return {'rank':round(mc_pts+liq_pts+vol_pts+flow_pts+momentum,2),'market_cap':mc,'liquidity':liq,'volume_24h':vol,'change_1h':ch1,'ratio':round(ratio,3),'pair_created_at':p.get('pairCreatedAt')}
+            # Fresh-pool priority: newly created pairs must compete on launch
+            # velocity, not only on mature 24h statistics. This is what keeps a
+            # MOO-like launch from being buried behind older high-volume tokens.
+            pair_created=p.get('pairCreatedAt'); freshness=0.0; launch_momentum=0.0; launch_flow=0.0
+            if pair_created:
+                try:
+                    age_min=max(0.0,(time.time()*1000-float(pair_created))/60000.0)
+                    if age_min<=60:
+                        freshness=max(0.0,40.0-(age_min/60.0)*40.0)
+                        ch5=float((p.get('priceChange') or {}).get('m5') or 0)
+                        tx5=(p.get('txns') or {}).get('m5') or {}; b5=float(tx5.get('buys') or 0); s5=float(tx5.get('sells') or 0); r5=b5/s5 if s5 else (99.0 if b5 else 0.0)
+                        launch_momentum=min(20.0,max(0.0,ch5/4.0)); launch_flow=min(20.0,max(0.0,(r5-0.8)*10.0))
+                except (TypeError,ValueError): pass
+            return {'rank':round(mc_pts+liq_pts+vol_pts+flow_pts+momentum+freshness+launch_momentum+launch_flow,2),'market_cap':mc,'liquidity':liq,'volume_24h':vol,'change_1h':ch1,'ratio':round(ratio,3),'pair_created_at':pair_created}
         except Exception:
             if item.get('new_pool'):
                 liq=float(item.get('new_pool_liquidity') or 0); vol=float(item.get('new_pool_volume_24h') or 0)
@@ -889,6 +902,30 @@ def report(st,days=None):
     return {'trades':len(xs),'pnl':round(sum(ps),4),'win_rate':round(len(wins)/len(xs)*100,2) if xs else 0,'best':round(max(ps),4) if ps else 0,'worst':round(min(ps),4) if ps else 0,'profit_factor':round(gross_win/gross_loss,3) if gross_loss else (999.0 if gross_win else 0.0),'max_drawdown':round(max_dd,4),'by_setup':setups}
 
 
+def performance_report_text(st, days=None):
+    r=report(st,days)
+    label='کل' if days is None else ('امروز' if days==1 else ('هفته' if days==7 else ('ماه' if days==30 else f'{days} روز')))
+    lines=[f'📊 گزارش عملکرد — {label}','',
+           f"Trades: {r['trades']} | Win rate: {r['win_rate']:.1f}%",
+           f"P/L: ${r['pnl']:+.4f} | Profit Factor: {r['profit_factor']}",
+           f"Best: ${r['best']:+.4f} | Worst: ${r['worst']:+.4f} | Max DD: ${r['max_drawdown']:.4f}",'']
+    if r.get('by_setup'):
+        lines.append('By setup:')
+        for k,v in sorted(r['by_setup'].items(),key=lambda kv:kv[1]['pnl'],reverse=True):
+            lines.append(f"• {k}: {v['trades']} trades | P/L ${v['pnl']:+.4f} | WR {v['win_rate']:.1f}%")
+    return '\n'.join(lines)[:3900]
+
+def live_trading_report(st,cfg):
+    live=cfg.get('live',{})
+    until=float(st.get('live_armed_until',0) or 0)
+    remaining=max(0,int(until-time.time()))
+    return ("🔐 LIVE TRADING\n\n"
+            f"Enabled: {bool(live.get('enabled',False))}\n"
+            f"Armed: {remaining>0} | Remaining: {remaining}s\n"
+            f"TOTP required: {bool(live.get('require_totp',True))}\n"
+            "Execution adapter: LOCKED\n"
+            "Current operating mode: DEMO only")
+
 def early_listing_report(st, limit=10):
     xs=st.get('early_listing_watch',[]) if isinstance(st.get('early_listing_watch',[]),list) else []
     xs=xs[-max(1,int(limit)):][::-1]
@@ -936,7 +973,7 @@ class Bot:
             if not ADDR_RE.match(a) or a.lower() in configured_addrs or a.lower() in seen: continue
             clean.append({'name':str(x.get('name','TOKEN')).upper(),'address':a}); seen.add(a.lower())
         self.st['manual_watchlist']=clean[:cap]; self.st['watchlist']=configured
-        self.st['version']='5.10.2'; self.st['state_schema']='5.10.2'
+        self.st['version']='5.11.0'; self.st['state_schema']='5.11.0'
         for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,'early_listing_watch':[]}.items(): self.st.setdefault(k,v)
     def save(self): atomic_json(self.state_path,self.st)
 
@@ -950,7 +987,7 @@ class Bot:
         created=p.get('pairCreatedAt')
         if not created: return None
         age_min=max(0, (time.time()*1000-float(created))/60000)
-        if age_min > float(cfg.get('candidate_max_age_minutes',5)): return None
+        if age_min > float(cfg.get('candidate_max_age_minutes',30)): return None
         liq=float((p.get('liquidity') or {}).get('usd') or 0)
         vol5=float((p.get('volume') or {}).get('m5') or 0)
         tx5=(p.get('txns') or {}).get('m5') or {}
@@ -958,11 +995,11 @@ class Bot:
         ratio=buys5/sells5 if sells5 else (99 if buys5 else 0)
         ch5=float((p.get('priceChange') or {}).get('m5') or 0)
         mc=float(p.get('marketCap') or p.get('fdv') or 0)
-        if liq < float(cfg.get('min_liquidity_usd',50000)): return None
-        if vol5 < float(cfg.get('min_volume_5m_usd',10000)): return None
-        if buys5 < int(cfg.get('min_buys_5m',8)): return None
-        if ratio < float(cfg.get('min_buy_sell_ratio_5m',1.10)): return None
-        if ch5 > float(cfg.get('max_price_change_5m',80)): return None
+        if liq < float(cfg.get('min_liquidity_usd',15000)): return None
+        if vol5 < float(cfg.get('min_volume_5m_usd',1500)): return None
+        if buys5 < int(cfg.get('min_buys_5m',3)): return None
+        if ratio < float(cfg.get('min_buy_sell_ratio_5m',1.05)): return None
+        if ch5 > float(cfg.get('max_price_change_5m',150)): return None
         if mc and mc < float(cfg.get('min_market_cap_usd',100000)): return None
         if mc and mc > float(cfg.get('max_market_cap_usd',20000000)): return None
         return {'name':item.get('name') or (p.get('baseToken') or {}).get('symbol') or 'TOKEN','address':a,'price':float(p.get('priceUsd') or 0),'market_cap':mc,'liquidity':liq,'volume_5m':vol5,'buys_5m':buys5,'sells_5m':sells5,'buy_sell_ratio_5m':round(ratio,2),'change_5m':ch5,'pair_age_minutes':round(age_min,2),'pair_address':p.get('pairAddress'),'early_listing':True}
@@ -1160,6 +1197,8 @@ class Bot:
                     key=x['address'].lower(); early=self.early_listing_signal(x) if early_cfg.get('enabled',True) and x.get('asset_class','crypto')=='crypto' else None
                     if early:
                         ew=self.st.setdefault('early_listing_watch',[])
+                        ek=key
+                        ew=[z for z in ew if str(z.get('address','')).lower()!=ek]
                         ew.append({**early,'seen_at':now})
                         self.st['early_listing_watch']=ew[-100:]
                     snap=self.api.snapshot(x['name'],x['address'],include_4h=False)
@@ -1233,7 +1272,16 @@ class Bot:
                     if confirmed and key not in self.st['demo']['positions']:
                         tid,why=risk_buy(self.st,self.cfg,sig,None); sig['demo_entry']=tid or why
                     # Early-listing lane: Demo-only automatic entry using dedicated fresh-pair filters.
-                    if early and bool(early_cfg.get('auto_demo_buy',False)) and key not in self.st['demo']['positions']:
+                    # Known hard concentration limits still veto an early entry. Holder count itself
+                    # is intentionally not required for very young pairs because it can lag launch.
+                    early_hard_safe=True
+                    if early:
+                        hard_top=float(self.cfg.get('filters',{}).get('top10_hard_limit',60))
+                        hard_largest=float(self.cfg.get('filters',{}).get('largest_holder_hard_limit',35))
+                        if sig.get('top10_pct') is not None and float(sig.get('top10_pct'))>=hard_top: early_hard_safe=False
+                        if sig.get('largest_holder_pct') is not None and float(sig.get('largest_holder_pct'))>=hard_largest: early_hard_safe=False
+                        if float(early.get('liquidity') or 0)<float(self.cfg.get('filters',{}).get('hard_min_liquidity',10000)): early_hard_safe=False
+                    if early and bool(early_cfg.get('auto_demo_buy',False)) and early_hard_safe and key not in self.st['demo']['positions']:
                         early_sig={**sig,'name':early['name'],'address':early['address'],'price':early['price'],
                                    'market_cap':early.get('market_cap'),'liquidity':early['liquidity'],
                                    'volume_24h':early.get('volume_5m'),'change_1h':early.get('change_5m'),
@@ -1245,6 +1293,11 @@ class Bot:
                         tid,why=risk_buy(self.st,self.cfg,early_sig,float(early_cfg.get('max_demo_entry_usd',5)))
                         sig['early_demo_entry']=tid or why
                         if tid: telegram_messages.append(self.format_signal_alert({**early_sig,'signal':'EARLY_DEMO_ENTRY','demo_entry':tid}))
+                    elif early and early_hard_safe:
+                        # Even when Demo capacity is full, expose the launch opportunity so it is not invisible.
+                        sig['early_demo_entry']='not entered: demo capacity/risk gate'
+                    elif early:
+                        sig['early_demo_entry']='blocked: hard safety limit'
                     if confirmed: telegram_messages.append(self.format_signal_alert(sig))
                     self.st.setdefault('last_scan',{})[key]={'name':sig.get('name'),'price':sig.get('price'),'ts':now,'score':sig.get('score'),'verdict':sig.get('verdict')}
                     if key in q:
@@ -1379,7 +1432,7 @@ class Bot:
 
     def telegram_status_text(self):
         d=self.st['demo']; positions=self.st['demo'].get('positions',{})
-        return (f"🤖 Global Multi-Asset Bot V5.10.1\n\n"
+        return (f"🤖 Global Multi-Asset Bot V5.11.0\n\n"
                 f"Mode: DEMO\n"
                 f"Scanner: every {self.cfg['scanner']['interval_seconds']}s\n"
                 f"Last scan universe: {self.st.get('last_scan_universe',{}).get('count',0)} token(s)\n"
@@ -1441,13 +1494,13 @@ class Bot:
     def telegram_text(self,txt):
         txt=txt.strip()
         if txt in ('/start','/menu'):
-            return '🤖 Global Multi-Asset Bot V5.10.1\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
+            return '🤖 Global Multi-Asset Bot V5.11.0\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
         if txt=='/help': return self.telegram_help_text()
         if txt=='/status': return self.telegram_status_text()
         if txt=='/demo': return f"{self.demo_text()}\n\n{self.telegram_positions_text()}"
         if txt=='/positions': return self.telegram_positions_text()
         if txt=='/watchlist': return self.telegram_watchlist_text()
-        if txt=='/live': return self.live_status()
+        if txt=='/live': return live_trading_report(self.st,self.cfg)
         if txt.startswith('/arm '): return self.arm_live(txt.split(maxsplit=1)[1])
         if txt.startswith('/demo_balance '):
             try:
@@ -1458,10 +1511,10 @@ class Bot:
         if txt=='/demo_reset':
             self.st['demo']={'cash':float(self.cfg['risk']['demo_start_balance_usd']),'positions':{},'realized_pnl':0.0,'trades':[]}; self.st['today']={'date':datetime.now(timezone.utc).date().isoformat(),'loss':0.0,'trades':0}; self.st['confirmations']={}; self.st['last_alert']={}; self.st['signal_active']={}; self.st['signal_last_score']={}; self.st['entry_cooldowns']={}; self.save(); return '♻️ Demo reset شد.'
         if txt=='/today': return '\n'.join(f"• {x.get('name')} — {x.get('verdict','?')} — {x.get('score','?')}/100" for x in self.st.get('daily_watch',[]))[:3900] or '👀 واچ امروز خالی است.'
-        if txt=='/daily': return '📅 امروز\n'+json.dumps(report(self.st,1),ensure_ascii=False)
-        if txt=='/weekly': return '📊 هفته\n'+json.dumps(report(self.st,7),ensure_ascii=False)
-        if txt=='/monthly': return '📈 ماه\n'+json.dumps(report(self.st,30),ensure_ascii=False)
-        if txt=='/report_all': return '📊 کل سابقه\n'+json.dumps(report(self.st,None),ensure_ascii=False)
+        if txt=='/daily': return performance_report_text(self.st,1)
+        if txt=='/weekly': return performance_report_text(self.st,7)
+        if txt=='/monthly': return performance_report_text(self.st,30)
+        if txt=='/report_all': return performance_report_text(self.st,None)
         if txt=='/early': return early_listing_report(self.st)
         if txt=='/panic': self.st['panic']=True; self.st['live_armed_until']=0; self.save(); return '🛑 PANIC STOP فعال شد.'
         if txt=='/resume': self.st['panic']=False; self.save(); return '✅ PANIC STOP خاموش شد. Live همچنان قفل است.'
@@ -1512,13 +1565,14 @@ class Bot:
             finally:
                 self.st['manual_watchlist']=old; self.save()
         if txt=='/settings':
-            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; return (f"⚙️ SETTINGS V5.10.1\nMC ${f['min_market_cap']:,.0f}-${f['max_market_cap']:,.0f} | Liq ${f['min_liquidity']:,.0f} | Vol ${f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
+            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; return (f"⚙️ SETTINGS V5.11.0\nMC ${f['min_market_cap']:,.0f}-${f['max_market_cap']:,.0f} | Liq ${f['min_liquidity']:,.0f} | Vol ${f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
                 f"Top10 {f['max_top10_pct']}%/{f.get('top10_hard_limit')}% | Largest {f['max_largest_holder_pct']}%/{f.get('largest_holder_hard_limit')}%\n"
                 f"Buy/Sell {f['min_buy_sell_ratio']} | 1H {f['max_1h_change']}% | 4H {f['min_4h_change']}% | Liq/MC {f['min_liquidity_mc_pct']}%\n"
                 f"Score Watch/Buy {sc['min_watch']}/{sc['min_buy_candidate']} | Tech {sc.get('min_tech_scan_score')} | Confirm {sg['required_confirmations']} | Entry cooldown {sg.get('entry_cooldown_minutes',0)}m\n"
                 f"Demo ${r['demo_start_balance_usd']} | target/trade {r.get('allocation_per_trade_pct',25)}% | max/trade ${r['demo_max_per_trade_usd']} | portfolio {r.get('max_portfolio_allocation_pct',75)}% | risk/trade {r.get('risk_per_trade_pct',2)}%\n"
                 f"SL {r['stop_loss_pct']}% | TP {r['take_profit_pct']}% | Trail {r['trailing_stop_pct']}%\n"
                 f"Rotation: feed {self.cfg['discovery'].get('candidate_pool_per_scan',40)} | watch {self.cfg['discovery'].get('watchlist_size',50)} | deep/batch {self.cfg['discovery'].get('deep_scan_candidates_per_scan',12)} | rescan {self.cfg['discovery'].get('deep_rescan_seconds',900)}s | Manual max {self.cfg['discovery'].get('manual_watchlist_max',20)}\n"
+                f"Early Listing: age {self.cfg['early_listing'].get('candidate_max_age_minutes',30)}m | liq ${self.cfg['early_listing'].get('min_liquidity_usd',15000):,.0f} | vol5 ${self.cfg['early_listing'].get('min_volume_5m_usd',1500):,.0f} | B/S {self.cfg['early_listing'].get('min_buy_sell_ratio_5m',1.05)} | auto Demo={self.cfg['early_listing'].get('auto_demo_buy',False)}\n"
                 f"Live enabled={self.cfg['live']['enabled']}")
         if txt.startswith('/set '):
             parts=txt.split()

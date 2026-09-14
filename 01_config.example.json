@@ -1,10 +1,10 @@
 {
   "app": {
-    "version": "5.10.2",
+    "version": "5.11.0",
     "chain": "robinhood",
     "chain_id": 4663,
     "mode": "GLOBAL_MULTI_ASSET",
-    "state_schema": "5.10.2"
+    "state_schema": "5.11.0"
   },
   "scanner": {
     "interval_seconds": 300,
@@ -17,13 +17,13 @@
     "max_candidates_per_scan": 100,
     "daily_watch_limit": 50,
     "max_persistent_watchlist": 20,
-    "candidate_pool_per_scan": 120,
-    "deep_scan_candidates_per_scan": 6,
-    "early_listing_reserve": 2,
+    "candidate_pool_per_scan": 160,
+    "deep_scan_candidates_per_scan": 8,
+    "early_listing_reserve": 4,
     "watchlist_size": 50,
     "deep_rescan_seconds": 300,
     "manual_watchlist_max": 20,
-    "queue_max_size": 1000,
+    "queue_max_size": 1200,
     "blockscout_pages_per_scan": 1,
     "global_crypto": true,
     "supported_crypto_chains": [
@@ -103,8 +103,8 @@
     "alert_cooldown_seconds": 1800,
     "hot_extra_confirmations": 1,
     "alert_score_change_repeat": 8,
-    "opportunity_alert_cooldown_seconds": 1800,
-    "opportunity_alert_score_change": 5.0,
+    "opportunity_alert_cooldown_seconds": 900,
+    "opportunity_alert_score_change": 4.0,
     "telegram_opportunity_alerts": false
   },
   "risk": {
@@ -155,13 +155,13 @@
   ],
   "early_listing": {
     "enabled": true,
-    "candidate_max_age_minutes": 10,
-    "min_liquidity_usd": 25000,
-    "min_volume_5m_usd": 3000,
-    "min_buys_5m": 5,
-    "min_buy_sell_ratio_5m": 1.0,
-    "max_price_change_5m": 120,
-    "min_market_cap_usd": 50000,
+    "candidate_max_age_minutes": 30,
+    "min_liquidity_usd": 15000,
+    "min_volume_5m_usd": 1500,
+    "min_buys_5m": 3,
+    "min_buy_sell_ratio_5m": 1.05,
+    "max_price_change_5m": 150,
+    "min_market_cap_usd": 30000,
     "max_market_cap_usd": 25000000,
     "auto_demo_buy": true,
     "max_demo_entry_usd": 5,
