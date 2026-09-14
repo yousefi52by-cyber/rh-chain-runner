@@ -1,0 +1,177 @@
+{
+  "app": {
+    "version": "5.10.0",
+    "chain": "robinhood",
+    "chain_id": 4663,
+    "mode": "GLOBAL_MULTI_ASSET",
+    "state_schema": "5.10.0"
+  },
+  "scanner": {
+    "interval_seconds": 300,
+    "timeout_seconds": 8,
+    "max_retries": 1,
+    "max_tokens_per_scan": 0
+  },
+  "discovery": {
+    "enabled": true,
+    "max_candidates_per_scan": 100,
+    "daily_watch_limit": 50,
+    "max_persistent_watchlist": 20,
+    "candidate_pool_per_scan": 120,
+    "deep_scan_candidates_per_scan": 6,
+    "early_listing_reserve": 2,
+    "watchlist_size": 50,
+    "deep_rescan_seconds": 300,
+    "manual_watchlist_max": 20,
+    "queue_max_size": 1000,
+    "blockscout_pages_per_scan": 1,
+    "global_crypto": true,
+    "supported_crypto_chains": [
+      "ethereum",
+      "solana",
+      "base",
+      "bsc",
+      "arbitrum",
+      "polygon",
+      "optimism",
+      "avalanche",
+      "robinhood",
+      "linea",
+      "blast",
+      "zksync",
+      "scroll",
+      "mantle",
+      "cronos",
+      "sui"
+    ]
+  },
+  "data": {
+    "max_age_seconds": 900,
+    "gecko_rate_limit_per_minute": 6,
+    "require_fresh_market_data": true,
+    "cache_ttl_seconds": 60
+  },
+  "filters": {
+    "min_market_cap": 1500000,
+    "max_market_cap": 20000000,
+    "min_liquidity": 150000,
+    "min_volume_24h": 250000,
+    "min_holders": 1500,
+    "max_top10_pct": 30,
+    "max_largest_holder_pct": 15,
+    "min_buy_sell_ratio": 0.95,
+    "max_1h_change": 20,
+    "min_4h_change": -15,
+    "min_liquidity_mc_pct": 1.5,
+    "top10_hard_limit": 60,
+    "largest_holder_hard_limit": 35,
+    "hot_1h_level_1": 80,
+    "hot_1h_level_2": 150,
+    "hot_1h_level_3": 300,
+    "hard_min_liquidity": 10000,
+    "preferred_market_cap_min": 1500000,
+    "preferred_market_cap_max": 20000000,
+    "preferred_liquidity": 150000,
+    "preferred_volume_24h": 250000
+  },
+  "score": {
+    "min_watch": 55,
+    "min_buy_candidate": 62,
+    "weights": {
+      "market_cap": 15,
+      "liquidity": 20,
+      "volume": 10,
+      "holders": 10,
+      "top10": 10,
+      "largest": 5,
+      "flow": 15,
+      "momentum_1h": 5,
+      "momentum_4h": 10
+    },
+    "top10_excess_penalty_max": 8,
+    "largest_excess_penalty_max": 10,
+    "hot_1h_penalty_max": 12,
+    "min_tech_scan_score": 45,
+    "chase_penalty_max": 10,
+    "pullback_min_resistance_room_pct": 1.5,
+    "pullback_max_ema_distance_pct": 3.0
+  },
+  "signal": {
+    "required_confirmations": 2,
+    "entry_cooldown_minutes": 30,
+    "alert_cooldown_seconds": 1800,
+    "hot_extra_confirmations": 1,
+    "alert_score_change_repeat": 8,
+    "opportunity_alert_cooldown_seconds": 1800,
+    "opportunity_alert_score_change": 5.0,
+    "telegram_opportunity_alerts": false
+  },
+  "risk": {
+    "demo_start_balance_usd": 20,
+    "demo_max_per_trade_usd": 5,
+    "max_open_positions": 3,
+    "max_trades_per_day": 10,
+    "max_daily_loss_usd": 2,
+    "stop_loss_pct": 8,
+    "take_profit_pct": 15,
+    "trailing_stop_pct": 6,
+    "live_max_total_capital_usd": 200,
+    "live_max_per_trade_usd": 20,
+    "live_max_daily_loss_usd": 10,
+    "live_max_trades_per_day": 5,
+    "dynamic_sizing": true,
+    "risk_per_trade_pct": 2.0,
+    "atr_stop_multiplier": 1.5,
+    "break_even_trigger_pct": 5,
+    "partial_tp_pct": 10,
+    "partial_tp_fraction": 0.5,
+    "allocation_per_trade_pct": 25.0,
+    "max_portfolio_allocation_pct": 75.0,
+    "commodity_max_allocation_pct": 25.0
+  },
+  "telegram": {
+    "admin_chat_ids": [],
+    "enabled": true
+  },
+  "live": {
+    "enabled": false,
+    "armed_seconds": 300,
+    "require_totp": true
+  },
+  "security": {
+    "never_store_private_key": true,
+    "require_chain_id_4663": false
+  },
+  "watchlist": [
+    {
+      "name": "JUGGERNAUT",
+      "address": "0xd7321801caae694090694ff55a9323139f043b88"
+    },
+    {
+      "name": "SPACEHOOD",
+      "address": "0xfe7e19cbce2f896c6c528bc355baf5a768291e18"
+    }
+  ],
+  "early_listing": {
+    "enabled": true,
+    "candidate_max_age_minutes": 5,
+    "min_liquidity_usd": 25000,
+    "min_volume_5m_usd": 3000,
+    "min_buys_5m": 5,
+    "min_buy_sell_ratio_5m": 1.0,
+    "max_price_change_5m": 120,
+    "min_market_cap_usd": 50000,
+    "max_market_cap_usd": 25000000,
+    "auto_demo_buy": false,
+    "max_demo_entry_usd": 5
+  },
+  "macro_markets": {
+    "gold": {
+      "enabled": true,
+      "symbol": "XAUUSD",
+      "source": "Stooq",
+      "deep_scan": true,
+      "auto_demo_buy": false
+    }
+  }
+}
