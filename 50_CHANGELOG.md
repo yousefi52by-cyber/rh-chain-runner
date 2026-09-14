@@ -1,11 +1,7 @@
-# V5.11.0 — Launch Radar + Complete Reporting
+# V5.11.1 — Persistent Settings + Momentum Frontier
 
-- Expanded fresh-pair radar to 30 minutes by default.
-- Increased early-listing reserve to 4 deep-scan slots.
-- Increased discovery feed to 160 candidates/scan.
-- Added freshness-aware ranking using pair age, 5m momentum and 5m buy/sell flow.
-- Added hard concentration/liquidity vetoes to Demo-only early-listing entries.
-- De-duplicated persisted Early Listing records.
-- Added richer Telegram performance reports for today, weekly, monthly and all-time periods.
-- Added explicit Live Trading status report while keeping execution locked and DEMO-only.
-- Kept all existing risk, confirmation, technical and anti-spam controls.
+- Telegram `/set KEY VALUE` settings persist in `state.json` and survive the public GitHub Actions runner recreation of `config.json`.
+- Added a reserved fast-momentum scan frontier for MOO-like moves.
+- Added configurable 30–120 minute momentum lane using 1H/5m acceleration, volume and flow.
+- Blockscout/other 4xx provider errors are not retried.
+- LIVE remains locked; settings interface cannot enable LIVE.

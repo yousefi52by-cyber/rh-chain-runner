@@ -1,4 +1,4 @@
-# Telegram Control & Alert Structure — V5.11.0
+# Telegram Control & Alert Structure — V5.11.1
 
 ## 1. Main menu
 - 📊 Market Scan — run one bounded market scan and return a compact summary.

@@ -1,0 +1,21 @@
+{
+  "package": "RH Bot V5.11.1",
+  "version": "5.11.1",
+  "mode": "DEMO only",
+  "live_execution": "LOCKED",
+  "features": [
+    "persistent Telegram settings",
+    "launch radar",
+    "fast momentum frontier",
+    "global multi-asset discovery",
+    "multi-timeframe technical analysis",
+    "demo risk management",
+    "Telegram reports"
+  ],
+  "tests": [
+    "50_TESTS.py",
+    "50_EARLY_DISCOVERY_TESTS.py",
+    "51_TELEGRAM_NOISE_TESTS.py",
+    "52_V5_11_1_FEATURE_TESTS.py"
+  ]
+}

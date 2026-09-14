@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Global Multi-Asset Trader V5.11.0. Opportunity-first scanner/demo/Telegram controller.
+"""Global Multi-Asset Trader V5.11.1. Opportunity-first scanner/demo/Telegram controller.
 Live trading is intentionally locked; no private key is accepted or stored.
 """
 import json, os, re, time, uuid, logging, threading, base64, hashlib, hmac, struct, math
@@ -14,7 +14,7 @@ GECKO='https://api.geckoterminal.com/api/v2'
 BLOCKSCOUT='https://api.blockscout.com/4663/api/v2'
 TG='https://api.telegram.org/bot{}/{}'
 CHAIN='robinhood'; CHAIN_ID=4663
-UA='Global-Trader-V5.11.0/1.0'
+UA='Global-Trader-V5.11.1/1.0'
 # DexScreener chain IDs -> GeckoTerminal network slugs for deep technical OHLCV.
 GECKO_NETWORKS={
     'ethereum':'eth','solana':'solana','bsc':'bsc','base':'base','arbitrum':'arbitrum','polygon':'polygon_pos',
@@ -44,9 +44,9 @@ def atomic_json(path, obj):
 
 def default_state(cfg):
     d=datetime.now(timezone.utc).date().isoformat()
-    return {'version':'5.11.0','state_schema':'5.11.0','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
+    return {'version':'5.11.1','state_schema':'5.11.1','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
       'watchlist':[],'manual_watchlist':[],'daily_watch':[],'daily_watch_date':d,'telegram_offset':0,'last_scan_universe':{},'entry_cooldowns':{},
-      'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,
+      'opportunity_queue':{},'settings_overrides':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,
       'demo':{'cash':float(cfg['risk']['demo_start_balance_usd']),'positions':{},'realized_pnl':0.0,'trades':[]},
       'today':{'date':d,'loss':0.0,'trades':0}}
 
@@ -138,12 +138,17 @@ class API:
                     raise RuntimeError(f'HTTP 429 rate limited{f"; retry-after={retry_after:.0f}s" if retry_after else ""}')
                 if r.status_code in (401,403):
                     raise RuntimeError(f'HTTP {r.status_code} unauthorized/forbidden')
+                if 400 <= r.status_code < 500:
+                    # Client-side/provider validation errors (e.g. Blockscout 422 for
+                    # an unsupported token address) are not transient. Retrying them
+                    # only wastes the scan budget and can amplify provider pressure.
+                    raise RuntimeError(f'HTTP {r.status_code} client/provider request rejected')
                 r.raise_for_status(); data=r.json()
                 if ttl>0: self.cache[key]=(time.time(),data)
                 return data
             except Exception as e:
                 last=e
-                if self._is_gecko(url) and '429' in str(e):
+                if 'HTTP 4' in str(e) or (self._is_gecko(url) and '429' in str(e)):
                     raise
                 if i<self.retries:
                     time.sleep(min(3.0,0.75*(i+1)))
@@ -954,12 +959,24 @@ def totp_valid(secret, code, step=30, window=1):
 class Bot:
     def __init__(self,cfg_path='config.json',state_path='state.json'):
         self.cfg_path=cfg_path; self.cfg=load_json(cfg_path,{}); self.state_path=state_path; self.st=load_json(state_path,default_state(self.cfg))
+        self._apply_persisted_settings()
         # V5.5.1 could persist every discovered token into watchlist. If an older
         # state file contains a large discovery backlog, scanning it serially can
         # exceed the GitHub Actions time limit. Keep configured/manual watch items
         # separate from per-scan discovery candidates.
         self._migrate_watchlist_state()
         rollover(self.st); self.api=API(self.cfg); self.lock=threading.Lock()
+    def _apply_persisted_settings(self):
+        overrides=self.st.get('settings_overrides',{}) if isinstance(self.st,dict) else {}
+        if not isinstance(overrides,dict): return
+        for section, values in overrides.items():
+            if not isinstance(values,dict): continue
+            target=self.cfg.get(section)
+            if not isinstance(target,dict): continue
+            for name,value in values.items():
+                if name in target:
+                    target[name]=value
+
     def _migrate_watchlist_state(self):
         configured=self.cfg.get('watchlist',[]) if isinstance(self.cfg.get('watchlist',[]),list) else []
         old=self.st.get('watchlist',[]) if isinstance(self.st.get('watchlist',[]),list) else []
@@ -973,8 +990,8 @@ class Bot:
             if not ADDR_RE.match(a) or a.lower() in configured_addrs or a.lower() in seen: continue
             clean.append({'name':str(x.get('name','TOKEN')).upper(),'address':a}); seen.add(a.lower())
         self.st['manual_watchlist']=clean[:cap]; self.st['watchlist']=configured
-        self.st['version']='5.11.0'; self.st['state_schema']='5.11.0'
-        for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,'early_listing_watch':[]}.items(): self.st.setdefault(k,v)
+        self.st['version']='5.11.1'; self.st['state_schema']='5.11.1'
+        for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},'opportunity_queue':{},'settings_overrides':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,'early_listing_watch':[]}.items(): self.st.setdefault(k,v)
     def save(self): atomic_json(self.state_path,self.st)
 
     def early_listing_signal(self, item):
@@ -987,22 +1004,40 @@ class Bot:
         created=p.get('pairCreatedAt')
         if not created: return None
         age_min=max(0, (time.time()*1000-float(created))/60000)
-        if age_min > float(cfg.get('candidate_max_age_minutes',30)): return None
+        max_age=max(float(cfg.get('candidate_max_age_minutes',30)),float(cfg.get('momentum_max_age_minutes',120)))
+        if age_min > max_age: return None
         liq=float((p.get('liquidity') or {}).get('usd') or 0)
         vol5=float((p.get('volume') or {}).get('m5') or 0)
         tx5=(p.get('txns') or {}).get('m5') or {}
         buys5=int(tx5.get('buys') or 0); sells5=int(tx5.get('sells') or 0)
         ratio=buys5/sells5 if sells5 else (99 if buys5 else 0)
         ch5=float((p.get('priceChange') or {}).get('m5') or 0)
+        ch1=float((p.get('priceChange') or {}).get('h1') or 0)
         mc=float(p.get('marketCap') or p.get('fdv') or 0)
-        if liq < float(cfg.get('min_liquidity_usd',15000)): return None
-        if vol5 < float(cfg.get('min_volume_5m_usd',1500)): return None
-        if buys5 < int(cfg.get('min_buys_5m',3)): return None
-        if ratio < float(cfg.get('min_buy_sell_ratio_5m',1.05)): return None
+        # A second fresh-momentum lane catches fast movers that are no longer in
+        # the first 30 minutes but are still in their launch phase. It uses its
+        # own thresholds and never requires the normal 60-candle TA history.
+        is_momentum=(age_min <= float(cfg.get('momentum_max_age_minutes',120)) and
+                     ch1 >= float(cfg.get('momentum_min_1h_change',18)) and
+                     ch5 >= float(cfg.get('momentum_min_5m_change',4)) and
+                     vol5 >= float(cfg.get('momentum_min_volume_5m_usd',1000)) and
+                     buys5 >= int(cfg.get('momentum_min_buys_5m',3)) and
+                     ratio >= float(cfg.get('momentum_min_buy_sell_ratio_5m',1.02)))
         if ch5 > float(cfg.get('max_price_change_5m',150)): return None
-        if mc and mc < float(cfg.get('min_market_cap_usd',100000)): return None
-        if mc and mc > float(cfg.get('max_market_cap_usd',20000000)): return None
-        return {'name':item.get('name') or (p.get('baseToken') or {}).get('symbol') or 'TOKEN','address':a,'price':float(p.get('priceUsd') or 0),'market_cap':mc,'liquidity':liq,'volume_5m':vol5,'buys_5m':buys5,'sells_5m':sells5,'buy_sell_ratio_5m':round(ratio,2),'change_5m':ch5,'pair_age_minutes':round(age_min,2),'pair_address':p.get('pairAddress'),'early_listing':True}
+        if not is_momentum:
+            if liq < float(cfg.get('min_liquidity_usd',15000)): return None
+            if vol5 < float(cfg.get('min_volume_5m_usd',1500)): return None
+            if buys5 < int(cfg.get('min_buys_5m',3)): return None
+            if ratio < float(cfg.get('min_buy_sell_ratio_5m',1.05)): return None
+            if ch5 > float(cfg.get('max_price_change_5m',150)): return None
+            if mc and mc < float(cfg.get('min_market_cap_usd',100000)): return None
+            if mc and mc > float(cfg.get('max_market_cap_usd',20000000)): return None
+        else:
+            # Momentum still has hard safety bounds; it is not a free pass.
+            if liq < float(cfg.get('min_liquidity_usd',15000)): return None
+            if mc and mc < float(cfg.get('min_market_cap_usd',100000)): return None
+            if mc and mc > float(cfg.get('max_market_cap_usd',20000000)): return None
+        return {'name':item.get('name') or (p.get('baseToken') or {}).get('symbol') or 'TOKEN','address':a,'price':float(p.get('priceUsd') or 0),'market_cap':mc,'liquidity':liq,'volume_5m':vol5,'buys_5m':buys5,'sells_5m':sells5,'buy_sell_ratio_5m':round(ratio,2),'change_5m':ch5,'change_1h_early':ch1,'pair_age_minutes':round(age_min,2),'pair_address':p.get('pairAddress'),'early_listing':True,'early_lane':'MOMENTUM' if is_momentum else 'LAUNCH'}
 
     def telegram_targets(self):
         ids={str(x) for x in self.cfg.get('telegram',{}).get('admin_chat_ids',[]) if str(x).strip()}
@@ -1187,8 +1222,27 @@ class Bot:
             early_take=min(early_reserve,remaining,len(early_due))
             chosen_early=early_due[:early_take]
             chosen_ids={x['address'].lower() for x in chosen_early}
+            # Reserve a small second frontier for fast movers such as a MOO-like
+            # token: not brand-new, but already accelerating on 5m/1h data.
+            momentum_reserve=max(0,int(self.cfg.get('discovery',{}).get('momentum_reserve',0) or 0))
+            momentum_candidates=[]
+            momentum_age=float(self.cfg.get('early_listing',{}).get('momentum_max_age_minutes',120))
+            momentum_1h=float(self.cfg.get('early_listing',{}).get('momentum_min_1h_change',18))
+            for z in normal_due:
+                if z['address'].lower() in chosen_ids or float(z.get('change_1h') or 0)<momentum_1h: continue
+                created=z.get('pair_created_at')
+                if not created: continue
+                try:
+                    age=(time.time()*1000-float(created))/60000.0
+                    if 0 <= age <= momentum_age: momentum_candidates.append(z)
+                except (TypeError,ValueError):
+                    continue
+            momentum_candidates.sort(key=lambda z:(float(z.get('change_1h') or 0),float(z.get('fast_rank') or 0)),reverse=True)
+            momentum_take=min(momentum_reserve,max(0,remaining-early_take),len(momentum_candidates))
+            chosen_momentum=momentum_candidates[:momentum_take]
+            chosen_ids.update(x['address'].lower() for x in chosen_momentum)
             rest=[x for x in (normal_due+early_due[early_take:]) if x['address'].lower() not in chosen_ids]
-            selected=open_priority+chosen_early+rest[:max(0,remaining-early_take)]
+            selected=open_priority+chosen_early+chosen_momentum+rest[:max(0,remaining-early_take-momentum_take)]
             selected_keys={x['address'].lower() for x in selected}
             self.st['last_scan_universe']={'count':len(selected),'deep_batch':min(remaining,len(due)),'priority_batch':len(open_priority),'queue_size':len(q),'watch_size':len(self.st.get('daily_watch',[])),'updated_at':now}
             out=[]; telegram_messages=[]
@@ -1287,7 +1341,7 @@ class Bot:
                                    'volume_24h':early.get('volume_5m'),'change_1h':early.get('change_5m'),
                                    'change_4h':0.0,'buys':early.get('buys_5m'),'sells':early.get('sells_5m'),
                                    'score':max(float(sig.get('score') or 0),float(early_cfg.get('demo_entry_score',70))),
-                                   'verdict':'BUY CANDIDATE','setup_type':'EARLY_LISTING','entry_ready':True,
+                                   'verdict':'BUY CANDIDATE','setup_type':('EARLY_MOMENTUM' if early.get('early_lane')=='MOMENTUM' else 'EARLY_LISTING'),'entry_ready':True,
                                    'suggested_stop_pct':float(early_cfg.get('stop_loss_pct',10.0)),
                                    'risk_flags':['EARLY_LISTING']}
                         tid,why=risk_buy(self.st,self.cfg,early_sig,float(early_cfg.get('max_demo_entry_usd',5)))
@@ -1315,31 +1369,53 @@ class Bot:
                 for i in range(0,len(batch),3800): self.send_telegram(batch[i:i+3800])
             return out
     def set_setting(self, key, value):
-        f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']
+        """Change a safe runtime setting and persist it in state.
+        The public runner recreates config.json when it is absent, so the override
+        is also stored in state.json (which the runner cache restores). LIVE flags
+        are intentionally not exposed through this interface.
+        """
+        f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; d=self.cfg['discovery']; e=self.cfg['early_listing']; data=self.cfg['data']
         mapping={
-            'mc_min':('filters','min_market_cap',float),'mc_max':('filters','max_market_cap',float),
-            'liquidity':('filters','min_liquidity',float),'volume':('filters','min_volume_24h',float),'holders':('filters','min_holders',int),
-            'top10_target':('filters','max_top10_pct',float),'top10_hard':('filters','top10_hard_limit',float),
-            'largest_target':('filters','max_largest_holder_pct',float),'largest_hard':('filters','largest_holder_hard_limit',float),
-            'buy_sell':('filters','min_buy_sell_ratio',float),'max_1h':('filters','max_1h_change',float),'min_4h':('filters','min_4h_change',float),
-            'liq_mc':('filters','min_liquidity_mc_pct',float),'hot1':('filters','hot_1h_level_1',float),'hot2':('filters','hot_1h_level_2',float),'hot3':('filters','hot_1h_level_3',float),
+            'mc_min':('filters','min_market_cap',float),'mc_max':('filters','max_market_cap',float),'liquidity':('filters','min_liquidity',float),'volume':('filters','min_volume_24h',float),'holders':('filters','min_holders',int),
+            'top10_target':('filters','max_top10_pct',float),'top10_hard':('filters','top10_hard_limit',float),'largest_target':('filters','max_largest_holder_pct',float),'largest_hard':('filters','largest_holder_hard_limit',float),
+            'buy_sell':('filters','min_buy_sell_ratio',float),'max_1h':('filters','max_1h_change',float),'min_4h':('filters','min_4h_change',float),'liq_mc':('filters','min_liquidity_mc_pct',float),
+            'hot1':('filters','hot_1h_level_1',float),'hot2':('filters','hot_1h_level_2',float),'hot3':('filters','hot_1h_level_3',float),'hard_liq':('filters','hard_min_liquidity',float),
             'watch_score':('score','min_watch',float),'buy_score':('score','min_buy_candidate',float),'tech_score':('score','min_tech_scan_score',float),'min_tech_candles':('score','min_technical_candles',int),
-            'top10_penalty':('score','top10_excess_penalty_max',float),'largest_penalty':('score','largest_excess_penalty_max',float),'hot_penalty':('score','hot_1h_penalty_max',float),
+            'top10_penalty':('score','top10_excess_penalty_max',float),'largest_penalty':('score','largest_excess_penalty_max',float),'hot_penalty':('score','hot_1h_penalty_max',float),'chase_penalty':('score','chase_penalty_max',float),
             'confirm':('signal','required_confirmations',int),'hot_confirm':('signal','hot_extra_confirmations',int),'cooldown':('signal','entry_cooldown_minutes',float),'alert_cooldown':('signal','alert_cooldown_seconds',float),
-            'demo_cap':('risk','demo_start_balance_usd',float),'max_trade':('risk','demo_max_per_trade_usd',float),'max_positions':('risk','max_open_positions',int),
-            'max_trades':('risk','max_trades_per_day',int),'daily_loss':('risk','max_daily_loss_usd',float),'alloc_pct':('risk','allocation_per_trade_pct',float),'portfolio_pct':('risk','max_portfolio_allocation_pct',float),'sl':('risk','stop_loss_pct',float),'tp':('risk','take_profit_pct',float),'trailing':('risk','trailing_stop_pct',float),
-            'early_max':('early_listing','max_demo_entry_usd',float),'early_liq':('early_listing','min_liquidity_usd',float),
-            'early_vol5':('early_listing','min_volume_5m_usd',float),'early_buys5':('early_listing','min_buys_5m',int),'early_ratio5':('early_listing','min_buy_sell_ratio_5m',float),
+            'opp_alerts':('signal','telegram_opportunity_alerts',lambda x:str(x).lower() in ('1','true','yes','on')),'opp_cooldown':('signal','opportunity_alert_cooldown_seconds',float),'opp_score_change':('signal','opportunity_alert_score_change',float),
+            'demo_cap':('risk','demo_start_balance_usd',float),'max_trade':('risk','demo_max_per_trade_usd',float),'max_positions':('risk','max_open_positions',int),'max_trades':('risk','max_trades_per_day',int),'daily_loss':('risk','max_daily_loss_usd',float),
+            'alloc_pct':('risk','allocation_per_trade_pct',float),'portfolio_pct':('risk','max_portfolio_allocation_pct',float),'sl':('risk','stop_loss_pct',float),'tp':('risk','take_profit_pct',float),'trailing':('risk','trailing_stop_pct',float),
+            'risk_pct':('risk','risk_per_trade_pct',float),'atr_mult':('risk','atr_stop_multiplier',float),'break_even':('risk','break_even_trigger_pct',float),'partial_tp':('risk','partial_tp_pct',float),'partial_fraction':('risk','partial_tp_fraction',float),
+            'discover_max':('discovery','candidate_pool_per_scan',int),'deep_max':('discovery','deep_scan_candidates_per_scan',int),'early_reserve':('discovery','early_listing_reserve',int),'momentum_reserve':('discovery','momentum_reserve',int),
+            'watch_size':('discovery','watchlist_size',int),'deep_rescan':('discovery','deep_rescan_seconds',float),'manual_max':('discovery','manual_watchlist_max',int),'queue_max':('discovery','queue_max_size',int),
+            'early_enabled':('early_listing','enabled',lambda x:str(x).lower() in ('1','true','yes','on')),'early_auto_demo':('early_listing','auto_demo_buy',lambda x:str(x).lower() in ('1','true','yes','on')),
+            'early_max':('early_listing','max_demo_entry_usd',float),'early_liq':('early_listing','min_liquidity_usd',float),'early_vol5':('early_listing','min_volume_5m_usd',float),'early_buys5':('early_listing','min_buys_5m',int),'early_ratio5':('early_listing','min_buy_sell_ratio_5m',float),
             'early_ch5':('early_listing','max_price_change_5m',float),'early_mc_min':('early_listing','min_market_cap_usd',float),'early_mc_max':('early_listing','max_market_cap_usd',float),'early_age':('early_listing','candidate_max_age_minutes',float),
-            'scan_max':('scanner','max_tokens_per_scan',int),'watch_size':('discovery','watchlist_size',int),'deep_rescan':('discovery','deep_rescan_seconds',float),'risk_pct':('risk','risk_per_trade_pct',float),'atr_mult':('risk','atr_stop_multiplier',float),'discover_max':('discovery','candidate_pool_per_scan',int),'deep_max':('discovery','deep_scan_candidates_per_scan',int),'early_reserve':('discovery','early_listing_reserve',int),'persistent_max':('discovery','max_persistent_watchlist',int),'alert_repeat_score':('signal','alert_score_change_repeat',float),
-            'gecko_rate':('data','gecko_rate_limit_per_minute',int),'cache_ttl':('data','cache_ttl_seconds',float)
+            'momentum_age':('early_listing','momentum_max_age_minutes',float),'momentum_1h':('early_listing','momentum_min_1h_change',float),'momentum_5m':('early_listing','momentum_min_5m_change',float),'momentum_vol5':('early_listing','momentum_min_volume_5m_usd',float),'momentum_buys5':('early_listing','momentum_min_buys_5m',int),'momentum_ratio5':('early_listing','momentum_min_buy_sell_ratio_5m',float),
+            'gecko_rate':('data','gecko_rate_limit_per_minute',int),'cache_ttl':('data','cache_ttl_seconds',float),'fresh_data':('data','require_fresh_market_data',lambda x:str(x).lower() in ('1','true','yes','on'))
         }
-        if key not in mapping: return 'Unknown setting'
-        section,name,cast=mapping[key]; v=cast(value)
-        if v < 0: raise ValueError('value must be >= 0')
+        if key not in mapping: raise ValueError('Unknown setting. Use /settings for the key list.')
+        section,name,cast=mapping[key]
+        raw=value
+        if cast is int: v=cast(float(value));
+        else: v=cast(value)
+        if cast is int and float(value)!=v: raise ValueError('integer value required')
+        if isinstance(v,bool): pass
+        elif float(v)<0: raise ValueError('value must be >= 0')
+        # Practical guardrails against accidental destructive settings.
+        limits={
+            'min_tech_candles':(30,500),'gecko_rate':(1,20),'deep_max':(1,50),'discover_max':(1,500),'watch_size':(1,500),'momentum_reserve':(0,20),'early_reserve':(0,20),
+            'confirm':(1,5),'hot_confirm':(0,3),'max_positions':(1,20),'max_trades':(1,100),'early_age':(5,240),'momentum_age':(30,360),'partial_fraction':(0,1),
+            'hot1':(0,1000),'hot2':(0,2000),'hot3':(0,5000)
+        }
+        if key in limits and not (limits[key][0] <= float(v) <= limits[key][1]): raise ValueError(f'{key} must be between {limits[key][0]} and {limits[key][1]}')
         self.cfg[section][name]=v
-        atomic_json(self.cfg_path,self.cfg)
-        return f'{key}={v}'
+        self.st.setdefault('settings_overrides',{}).setdefault(section,{})[name]=v
+        atomic_json(self.cfg_path,self.cfg); self.save()
+        # Keep API pacing immediately aligned with a changed Gecko rate setting.
+        if section=='data' and name=='gecko_rate_limit_per_minute': self.api.gecko_limit=max(1,min(20,int(v)))
+        return f'{key}={v} (persistent)'
 
     def live_status(self):
         until=float(self.st.get('live_armed_until',0) or 0)
@@ -1432,7 +1508,7 @@ class Bot:
 
     def telegram_status_text(self):
         d=self.st['demo']; positions=self.st['demo'].get('positions',{})
-        return (f"🤖 Global Multi-Asset Bot V5.11.0\n\n"
+        return (f"🤖 Global Multi-Asset Bot V5.11.1\n\n"
                 f"Mode: DEMO\n"
                 f"Scanner: every {self.cfg['scanner']['interval_seconds']}s\n"
                 f"Last scan universe: {self.st.get('last_scan_universe',{}).get('count',0)} token(s)\n"
@@ -1494,7 +1570,7 @@ class Bot:
     def telegram_text(self,txt):
         txt=txt.strip()
         if txt in ('/start','/menu'):
-            return '🤖 Global Multi-Asset Bot V5.11.0\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
+            return '🤖 Global Multi-Asset Bot V5.11.1\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
         if txt=='/help': return self.telegram_help_text()
         if txt=='/status': return self.telegram_status_text()
         if txt=='/demo': return f"{self.demo_text()}\n\n{self.telegram_positions_text()}"
@@ -1565,22 +1641,30 @@ class Bot:
             finally:
                 self.st['manual_watchlist']=old; self.save()
         if txt=='/settings':
-            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; return (f"⚙️ SETTINGS V5.11.0\nMC ${f['min_market_cap']:,.0f}-${f['max_market_cap']:,.0f} | Liq ${f['min_liquidity']:,.0f} | Vol ${f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
-                f"Top10 {f['max_top10_pct']}%/{f.get('top10_hard_limit')}% | Largest {f['max_largest_holder_pct']}%/{f.get('largest_holder_hard_limit')}%\n"
-                f"Buy/Sell {f['min_buy_sell_ratio']} | 1H {f['max_1h_change']}% | 4H {f['min_4h_change']}% | Liq/MC {f['min_liquidity_mc_pct']}%\n"
-                f"Score Watch/Buy {sc['min_watch']}/{sc['min_buy_candidate']} | Tech {sc.get('min_tech_scan_score')} | Confirm {sg['required_confirmations']} | Entry cooldown {sg.get('entry_cooldown_minutes',0)}m\n"
-                f"Demo ${r['demo_start_balance_usd']} | target/trade {r.get('allocation_per_trade_pct',25)}% | max/trade ${r['demo_max_per_trade_usd']} | portfolio {r.get('max_portfolio_allocation_pct',75)}% | risk/trade {r.get('risk_per_trade_pct',2)}%\n"
-                f"SL {r['stop_loss_pct']}% | TP {r['take_profit_pct']}% | Trail {r['trailing_stop_pct']}%\n"
-                f"Rotation: feed {self.cfg['discovery'].get('candidate_pool_per_scan',40)} | watch {self.cfg['discovery'].get('watchlist_size',50)} | deep/batch {self.cfg['discovery'].get('deep_scan_candidates_per_scan',12)} | rescan {self.cfg['discovery'].get('deep_rescan_seconds',900)}s | Manual max {self.cfg['discovery'].get('manual_watchlist_max',20)}\n"
-                f"Early Listing: age {self.cfg['early_listing'].get('candidate_max_age_minutes',30)}m | liq ${self.cfg['early_listing'].get('min_liquidity_usd',15000):,.0f} | vol5 ${self.cfg['early_listing'].get('min_volume_5m_usd',1500):,.0f} | B/S {self.cfg['early_listing'].get('min_buy_sell_ratio_5m',1.05)} | auto Demo={self.cfg['early_listing'].get('auto_demo_buy',False)}\n"
-                f"Live enabled={self.cfg['live']['enabled']}")
+            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; d=self.cfg['discovery']; e=self.cfg['early_listing']; data=self.cfg['data']
+            return (f"⚙️ SETTINGS V5.11.1\n\n"
+                f"📌 FILTERS\nMC {f['min_market_cap']:,.0f}-{f['max_market_cap']:,.0f} | Liq {f['min_liquidity']:,.0f} | Vol {f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
+                f"Top10 {f['max_top10_pct']} / hard {f.get('top10_hard_limit')} | Largest {f['max_largest_holder_pct']} / hard {f.get('largest_holder_hard_limit')}\n"
+                f"B/S {f['min_buy_sell_ratio']} | 1H max {f['max_1h_change']} | 4H min {f['min_4h_change']} | Liq/MC {f['min_liquidity_mc_pct']} | hard liq {f.get('hard_min_liquidity')}\n\n"
+                f"🎯 SCORE/ENTRY\nWatch/Buy {sc['min_watch']}/{sc['min_buy_candidate']} | Tech {sc.get('min_tech_scan_score')} | Candles {sc.get('min_technical_candles')} | Confirm {sg['required_confirmations']} | Hot extra {sg.get('hot_extra_confirmations')}\n"
+                f"Cooldown {sg.get('entry_cooldown_minutes',0)}m | Alert {sg.get('alert_cooldown_seconds',0)}s | Opp alerts {sg.get('telegram_opportunity_alerts',False)}\n\n"
+                f"🧭 DISCOVERY\nFeed {d.get('candidate_pool_per_scan')} | Deep {d.get('deep_scan_candidates_per_scan')} | Early reserve {d.get('early_listing_reserve')} | Momentum reserve {d.get('momentum_reserve',0)} | Watch {d.get('watchlist_size')} | Queue {d.get('queue_max_size')} | Rescan {d.get('deep_rescan_seconds')}s\n\n"
+                f"🚀 LAUNCH/MOMENTUM\nEarly {e.get('enabled')} | age {e.get('candidate_max_age_minutes')}m | liq {e.get('min_liquidity_usd'):,.0f} | vol5 {e.get('min_volume_5m_usd'):,.0f} | B/S {e.get('min_buy_sell_ratio_5m')} | auto Demo {e.get('auto_demo_buy')}\n"
+                f"Momentum age {e.get('momentum_max_age_minutes')}m | 1H ≥ {e.get('momentum_min_1h_change')}% | 5m ≥ {e.get('momentum_min_5m_change')}% | vol5 ≥ {e.get('momentum_min_volume_5m_usd'):,.0f}\n\n"
+                f"🛡 DEMO/RISK\nBalance {r['demo_start_balance_usd']} | max/trade {r['demo_max_per_trade_usd']} | positions {r['max_open_positions']} | daily loss {r['max_daily_loss_usd']} | SL {r['stop_loss_pct']}% | TP {r['take_profit_pct']}% | Trail {r['trailing_stop_pct']}%\n"
+                f"Risk/trade {r.get('risk_per_trade_pct')}% | Allocation {r.get('allocation_per_trade_pct')}% | Portfolio {r.get('max_portfolio_allocation_pct')}%\n\n"
+                f"📡 DATA\nGecko rate {data.get('gecko_rate_limit_per_minute')}/min | Cache {data.get('cache_ttl_seconds')}s | Fresh required {data.get('require_fresh_market_data')}\n\n"
+                f"🔐 LIVE: LOCKED / DEMO ONLY\n\n"
+                f"برای تغییر: /set KEY VALUE\nکلیدهای مهم: buy_score, tech_score, confirm, discover_max, deep_max, early_reserve, momentum_reserve, early_age, momentum_age, momentum_1h, momentum_5m, early_auto_demo, opp_alerts, gecko_rate")
         if txt.startswith('/set '):
             parts=txt.split()
             if len(parts)!=3: return 'استفاده: /set KEY VALUE — کلیدها را در /settings ببین.'
             try: return '✅ OK: '+self.set_setting(parts[1],parts[2])
             except Exception as e: return 'خطا: '+str(e)
         if txt=='/scan':
-            return '⏳ برای اجرای اسکن از دکمه 📊 اسکن بازار یا /scan استفاده کن.'
+            try:
+                results=self.scan(); return '📊 SCAN COMPLETE\n\n'+'\n\n'.join(f"• {r.get('name')} — {r.get('verdict')} — {r.get('score','?')}/100" for r in results)[:3900]
+            except Exception as e: return '❌ خطا در اسکن: '+str(e)
         return 'دستور نامعتبر. /menu'
 
     def telegram_callback(self, callback):
