@@ -1,10 +1,10 @@
 {
   "app": {
-    "version": "5.10.0",
+    "version": "5.10.2",
     "chain": "robinhood",
     "chain_id": 4663,
     "mode": "GLOBAL_MULTI_ASSET",
-    "state_schema": "5.10.0"
+    "state_schema": "5.10.2"
   },
   "scanner": {
     "interval_seconds": 300,
@@ -92,6 +92,7 @@
     "largest_excess_penalty_max": 10,
     "hot_1h_penalty_max": 12,
     "min_tech_scan_score": 45,
+    "min_technical_candles": 60,
     "chase_penalty_max": 10,
     "pullback_min_resistance_room_pct": 1.5,
     "pullback_max_ema_distance_pct": 3.0
@@ -154,7 +155,7 @@
   ],
   "early_listing": {
     "enabled": true,
-    "candidate_max_age_minutes": 5,
+    "candidate_max_age_minutes": 10,
     "min_liquidity_usd": 25000,
     "min_volume_5m_usd": 3000,
     "min_buys_5m": 5,
@@ -162,8 +163,10 @@
     "max_price_change_5m": 120,
     "min_market_cap_usd": 50000,
     "max_market_cap_usd": 25000000,
-    "auto_demo_buy": false,
-    "max_demo_entry_usd": 5
+    "auto_demo_buy": true,
+    "max_demo_entry_usd": 5,
+    "stop_loss_pct": 10.0,
+    "demo_entry_score": 70
   },
   "macro_markets": {
     "gold": {

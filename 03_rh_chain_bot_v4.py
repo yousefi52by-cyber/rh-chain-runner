@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Global Multi-Asset Trader V5.10.0. Opportunity-first scanner/demo/Telegram controller.
+"""Global Multi-Asset Trader V5.10.1. Opportunity-first scanner/demo/Telegram controller.
 Live trading is intentionally locked; no private key is accepted or stored.
 """
 import json, os, re, time, uuid, logging, threading, base64, hashlib, hmac, struct, math
@@ -14,7 +14,7 @@ GECKO='https://api.geckoterminal.com/api/v2'
 BLOCKSCOUT='https://api.blockscout.com/4663/api/v2'
 TG='https://api.telegram.org/bot{}/{}'
 CHAIN='robinhood'; CHAIN_ID=4663
-UA='Global-Trader-V5.10.0/1.0'
+UA='Global-Trader-V5.10.1/1.0'
 # DexScreener chain IDs -> GeckoTerminal network slugs for deep technical OHLCV.
 GECKO_NETWORKS={
     'ethereum':'eth','solana':'solana','bsc':'bsc','base':'base','arbitrum':'arbitrum','polygon':'polygon_pos',
@@ -44,7 +44,7 @@ def atomic_json(path, obj):
 
 def default_state(cfg):
     d=datetime.now(timezone.utc).date().isoformat()
-    return {'version':'5.10.0','state_schema':'5.10.0','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},
+    return {'version':'5.10.2','state_schema':'5.10.2','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
       'watchlist':[],'manual_watchlist':[],'daily_watch':[],'daily_watch_date':d,'telegram_offset':0,'last_scan_universe':{},'entry_cooldowns':{},
       'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,
       'demo':{'cash':float(cfg['risk']['demo_start_balance_usd']),'positions':{},'realized_pnl':0.0,'trades':[]},
@@ -516,6 +516,55 @@ def _rsi(values,period=14):
     if al==0: return 100.0 if ag>0 else 50.0
     rs=ag/al; return 100.0-(100.0/(1.0+rs))
 
+def _aggregate_4h(rows):
+    """Aggregate chronological hourly OHLCV rows into 4-hour candles."""
+    buckets={}
+    for r in rows or []:
+        if not isinstance(r,(list,tuple)) or len(r)<6: continue
+        try:
+            ts=float(r[0]); bucket=int(ts//(4*3600))
+            buckets.setdefault(bucket,[]).append(r)
+        except (TypeError,ValueError):
+            continue
+    out=[]
+    for bucket,rs in sorted(buckets.items()):
+        rs=sorted(rs,key=lambda x:float(x[0]))
+        if len(rs)<3: continue
+        try:
+            out.append((float(rs[0][0]),float(rs[0][1]),max(float(x[2]) for x in rs),min(float(x[3]) for x in rs),float(rs[-1][4]),sum(float(x[5]) for x in rs)))
+        except (TypeError,ValueError):
+            continue
+    return out
+
+
+def _technical_snapshot(rows,tpool,min_candles=60):
+    rows=[r for r in rows if isinstance(r,(list,tuple)) and len(r)>=6]
+    rows.sort(key=lambda r:float(r[0]))
+    if len(rows)<int(min_candles):
+        raise RuntimeError(f'insufficient Gecko technical OHLCV ({len(rows)}; need {int(min_candles)})')
+    closes=[float(r[4]) for r in rows]; highs=[float(r[2]) for r in rows]; lows=[float(r[3]) for r in rows]; vols=[float(r[5]) for r in rows]
+    close=closes[-1]; ema20=_ema(closes,20); ema50=_ema(closes,50); ema200=_ema(closes,200); rsi14=_rsi(closes,14)
+    if close<=0 or ema20 is None or ema50 is None or rsi14 is None:
+        raise RuntimeError('technical indicators incomplete')
+    trs=[]
+    for i in range(1,len(rows)):
+        prev=closes[i-1]; trs.append(max(highs[i]-lows[i],abs(highs[i]-prev),abs(lows[i]-prev)))
+    atr_pct=(sum(trs[-14:])/14/close*100) if len(trs)>=14 else None
+    resistance=max(highs[-21:-1]) if len(highs)>=22 else max(highs[:-1])
+    support=min(lows[-21:-1]) if len(lows)>=22 else min(lows[:-1])
+    breakout=(close/resistance-1)*100 if resistance>0 else None
+    last3=sum(vols[-3:])/3; prev15=sum(vols[-18:-3])/15 if len(vols)>=18 else 0; vol_ratio=last3/prev15 if prev15>0 else None
+    hh=max(highs[-5:])>max(highs[-10:-5]) if len(highs)>=10 else False
+    hl=min(lows[-5:])>min(lows[-10:-5]) if len(lows)>=10 else False
+    lh=max(highs[-5:])<max(highs[-10:-5]) if len(highs)>=10 else False
+    ll=min(lows[-5:])<min(lows[-10:-5]) if len(lows)>=10 else False
+    bars4=_aggregate_4h(rows)
+    c4=[float(r[4]) for r in bars4]
+    e20_4=_ema(c4,20); rsi14_4=_rsi(c4,14)
+    mtf_trend='BULLISH' if e20_4 is not None and c4[-1]>e20_4 else ('BEARISH' if e20_4 is not None and c4[-1]<e20_4 else 'UNKNOWN')
+    return {'close':close,'ema20':ema20,'ema50':ema50,'ema200':ema200,'rsi14':rsi14,'atr_pct':atr_pct,'resistance':resistance,'support':support,'breakout_pct':breakout,'volume_ratio':vol_ratio,'higher_high':hh,'higher_low':hl,'lower_high':lh,'lower_low':ll,'pool':tpool,'candles':len(rows),'mtf_4h_ema20':e20_4,'mtf_4h_rsi14':rsi14_4,'mtf_4h_trend':mtf_trend,'mtf_4h_candles':len(bars4)}
+
+
 def technical_score(s):
     t=s.get('technical')
     if not isinstance(t,dict): return None,[]
@@ -562,6 +611,12 @@ def technical_score(s):
         if 2<=atr<=10: score+=12
         elif atr<=15: score+=7
         else: score+=2; reasons.append('HIGH_ATR')
+    mtf_trend=t.get('mtf_4h_trend')
+    mtf_rsi=t.get('mtf_4h_rsi14')
+    if mtf_trend=='BULLISH': score+=5; reasons.append('4H_TREND_BULLISH')
+    elif mtf_trend=='BEARISH': score-=5; reasons.append('4H_TREND_BEARISH')
+    if mtf_rsi is not None and 45<=float(mtf_rsi)<=70:
+        score+=3; reasons.append('4H_RSI_HEALTHY')
     return round(max(0,min(100,score)),2),reasons
 
 def classify_setup(t,cfg=None):
@@ -833,6 +888,16 @@ def report(st,days=None):
     for q in setups.values(): q['pnl']=round(q['pnl'],4); q['win_rate']=round(q['wins']/q['trades']*100,2) if q['trades'] else 0
     return {'trades':len(xs),'pnl':round(sum(ps),4),'win_rate':round(len(wins)/len(xs)*100,2) if xs else 0,'best':round(max(ps),4) if ps else 0,'worst':round(min(ps),4) if ps else 0,'profit_factor':round(gross_win/gross_loss,3) if gross_loss else (999.0 if gross_win else 0.0),'max_drawdown':round(max_dd,4),'by_setup':setups}
 
+
+def early_listing_report(st, limit=10):
+    xs=st.get('early_listing_watch',[]) if isinstance(st.get('early_listing_watch',[]),list) else []
+    xs=xs[-max(1,int(limit)):][::-1]
+    if not xs: return '🚀 Early Listings\n\nموردی ثبت نشده است.'
+    lines=['🚀 EARLY LISTINGS','']
+    for x in xs:
+        lines.append(f"• {x.get('name','TOKEN')} | age {x.get('pair_age_minutes','?')}m | 5m {float(x.get('change_5m',0) or 0):+.2f}% | B/S {x.get('buys_5m',0)}/{x.get('sells_5m',0)} | liq ${float(x.get('liquidity',0) or 0):,.0f}")
+    return '\n'.join(lines)[:3900]
+
 def totp_valid(secret, code, step=30, window=1):
     try:
         key=base64.b32decode(secret.strip().replace(' ','').upper() + '='*((8-len(secret.strip().replace(' ','').upper())%8)%8),casefold=True)
@@ -871,8 +936,8 @@ class Bot:
             if not ADDR_RE.match(a) or a.lower() in configured_addrs or a.lower() in seen: continue
             clean.append({'name':str(x.get('name','TOKEN')).upper(),'address':a}); seen.add(a.lower())
         self.st['manual_watchlist']=clean[:cap]; self.st['watchlist']=configured
-        self.st['version']='5.9.8'; self.st['state_schema']='5.9.8'
-        for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0}.items(): self.st.setdefault(k,v)
+        self.st['version']='5.10.2'; self.st['state_schema']='5.10.2'
+        for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},'opportunity_queue':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,'early_listing_watch':[]}.items(): self.st.setdefault(k,v)
     def save(self): atomic_json(self.state_path,self.st)
 
     def early_listing_signal(self, item):
@@ -1017,7 +1082,7 @@ class Bot:
                 for x in discovered:
                     for src in (x.get('sources') or ['unknown']): src_counts[src]=src_counts.get(src,0)+1
                 log.info('DISCOVERY | requested=%d | unique=%d | sources=%s | queue=%d | active_watch=%d',pool_size,len(discovered),src_counts,len(q),len(active))
-            # V5.10.0: one bounded Deep Scan budget is shared by all queued
+            # V5.10.1: one bounded Deep Scan budget is shared by all queued
             # opportunities. Configured/manual watch items are seeded into that
             # same queue but receive NO reserved slot and NO priority bonus.
             # Open demo positions remain the sole exception because they require
@@ -1093,6 +1158,10 @@ class Bot:
             for x in selected:
                 try:
                     key=x['address'].lower(); early=self.early_listing_signal(x) if early_cfg.get('enabled',True) and x.get('asset_class','crypto')=='crypto' else None
+                    if early:
+                        ew=self.st.setdefault('early_listing_watch',[])
+                        ew.append({**early,'seen_at':now})
+                        self.st['early_listing_watch']=ew[-100:]
                     snap=self.api.snapshot(x['name'],x['address'],include_4h=False)
                     # Deep technical analysis is performed on every selected rotation item.
                     try:
@@ -1103,18 +1172,10 @@ class Bot:
                         if x.get('asset_class')=='commodity':
                             pass
                         else:
-                            if len(rows)<200: raise RuntimeError(f'only {len(rows)} valid OHLCV candles')
-                            closes=[float(r[4]) for r in rows]; highs=[float(r[2]) for r in rows]; lows=[float(r[3]) for r in rows]; vols=[float(r[5]) for r in rows]
-                            close=closes[-1]; ema20=_ema(closes,20); ema50=_ema(closes,50); ema200=_ema(closes,200); rsi14=_rsi(closes,14)
-                            if len(closes)>=5: snap['change_4h']=(close/closes[-5]-1)*100 if closes[-5]>0 else None
-                            trs=[]
-                            for i in range(1,len(rows)):
-                                prev=closes[i-1]; trs.append(max(highs[i]-lows[i],abs(highs[i]-prev),abs(lows[i]-prev)))
-                            atr_pct=(sum(trs[-14:])/14/close*100) if len(trs)>=14 and close>0 else None
-                            resistance=max(highs[-21:-1]); support=min(lows[-21:-1]); breakout=(close/resistance-1)*100 if resistance>0 else None
-                            last3=sum(vols[-3:])/3; prev15=sum(vols[-18:-3])/15; vol_ratio=last3/prev15 if prev15>0 else None
-                            hh=max(highs[-5:])>max(highs[-10:-5]); hl=min(lows[-5:])>min(lows[-10:-5]); lh=max(highs[-5:])<max(highs[-10:-5]); ll=min(lows[-5:])<min(lows[-10:-5])
-                            snap['technical']={'close':close,'ema20':ema20,'ema50':ema50,'ema200':ema200,'rsi14':rsi14,'atr_pct':atr_pct,'resistance':resistance,'support':support,'breakout_pct':breakout,'volume_ratio':vol_ratio,'higher_high':hh,'higher_low':hl,'lower_high':lh,'lower_low':ll,'pool':tpool,'candles':len(rows)}
+                            min_candles=int(self.cfg.get('score',{}).get('min_technical_candles',60) or 60)
+                            snap['technical']=_technical_snapshot(rows,tpool,min_candles)
+                            closes=[float(r[4]) for r in rows]
+                            if len(closes)>=5: snap['change_4h']=(closes[-1]/closes[-5]-1)*100 if closes[-5]>0 else None
                     except Exception as e: snap['errors'].append('technical:'+str(e))
                     sig=score(snap,self.cfg); sig.update({k:snap.get(k) for k in ('price','market_cap','liquidity','volume_24h','change_1h','change_4h','holders','top10_pct','largest_holder_pct','buys','sells','technical','asset_class','chain_id')})
                     if snap.get('errors'): sig['data_errors']=snap['errors']
@@ -1158,8 +1219,11 @@ class Bot:
                     if sig['verdict']=='BUY CANDIDATE' and conf>=required and tech_ok and sig.get('setup_type') not in ('MOMENTUM_CHASE','NO_SETUP') and sig.get('entry_ready'):
                         active=self.st.setdefault('signal_active',{}).get(key,False); last_score=float(self.st.setdefault('signal_last_score',{}).get(key,0) or 0); delta=abs(float(sig.get('score') or 0)-last_score); last=float(self.st.setdefault('last_alert',{}).get(key,0) or 0); repeat=float(self.cfg['signal'].get('alert_score_change_repeat',8));
                         cooldown=float(self.cfg['signal']['alert_cooldown_seconds'])
-                        if now-last>=cooldown:
+                        setup_changed=str(sig.get('setup_type','UNKNOWN')) != str(self.st.setdefault('signal_setup',{}).get(key,'UNKNOWN'))
+                        materially_changed=(delta>=repeat or setup_changed or not active)
+                        if now-last>=cooldown and materially_changed:
                             self.st['last_alert'][key]=now; confirmed=True
+                        self.st.setdefault('signal_setup',{})[key]=str(sig.get('setup_type','UNKNOWN'))
                         self.st['signal_active'][key]=True; self.st['signal_last_score'][key]=float(sig.get('score') or 0)
                     else:
                         self.st.setdefault('signal_active',{})[key]=False
@@ -1168,6 +1232,19 @@ class Bot:
                     if tr: sig['demo_exit']=tr; telegram_messages.append(f"📉 DEMO EXIT | {sig.get('name')} | {tr.get('reason')} | PnL ${tr.get('pnl',0):+.4f} ({tr.get('pnl_pct',0):+.2f}%)")
                     if confirmed and key not in self.st['demo']['positions']:
                         tid,why=risk_buy(self.st,self.cfg,sig,None); sig['demo_entry']=tid or why
+                    # Early-listing lane: Demo-only automatic entry using dedicated fresh-pair filters.
+                    if early and bool(early_cfg.get('auto_demo_buy',False)) and key not in self.st['demo']['positions']:
+                        early_sig={**sig,'name':early['name'],'address':early['address'],'price':early['price'],
+                                   'market_cap':early.get('market_cap'),'liquidity':early['liquidity'],
+                                   'volume_24h':early.get('volume_5m'),'change_1h':early.get('change_5m'),
+                                   'change_4h':0.0,'buys':early.get('buys_5m'),'sells':early.get('sells_5m'),
+                                   'score':max(float(sig.get('score') or 0),float(early_cfg.get('demo_entry_score',70))),
+                                   'verdict':'BUY CANDIDATE','setup_type':'EARLY_LISTING','entry_ready':True,
+                                   'suggested_stop_pct':float(early_cfg.get('stop_loss_pct',10.0)),
+                                   'risk_flags':['EARLY_LISTING']}
+                        tid,why=risk_buy(self.st,self.cfg,early_sig,float(early_cfg.get('max_demo_entry_usd',5)))
+                        sig['early_demo_entry']=tid or why
+                        if tid: telegram_messages.append(self.format_signal_alert({**early_sig,'signal':'EARLY_DEMO_ENTRY','demo_entry':tid}))
                     if confirmed: telegram_messages.append(self.format_signal_alert(sig))
                     self.st.setdefault('last_scan',{})[key]={'name':sig.get('name'),'price':sig.get('price'),'ts':now,'score':sig.get('score'),'verdict':sig.get('verdict')}
                     if key in q:
@@ -1193,7 +1270,7 @@ class Bot:
             'largest_target':('filters','max_largest_holder_pct',float),'largest_hard':('filters','largest_holder_hard_limit',float),
             'buy_sell':('filters','min_buy_sell_ratio',float),'max_1h':('filters','max_1h_change',float),'min_4h':('filters','min_4h_change',float),
             'liq_mc':('filters','min_liquidity_mc_pct',float),'hot1':('filters','hot_1h_level_1',float),'hot2':('filters','hot_1h_level_2',float),'hot3':('filters','hot_1h_level_3',float),
-            'watch_score':('score','min_watch',float),'buy_score':('score','min_buy_candidate',float),'tech_score':('score','min_tech_scan_score',float),
+            'watch_score':('score','min_watch',float),'buy_score':('score','min_buy_candidate',float),'tech_score':('score','min_tech_scan_score',float),'min_tech_candles':('score','min_technical_candles',int),
             'top10_penalty':('score','top10_excess_penalty_max',float),'largest_penalty':('score','largest_excess_penalty_max',float),'hot_penalty':('score','hot_1h_penalty_max',float),
             'confirm':('signal','required_confirmations',int),'hot_confirm':('signal','hot_extra_confirmations',int),'cooldown':('signal','entry_cooldown_minutes',float),'alert_cooldown':('signal','alert_cooldown_seconds',float),
             'demo_cap':('risk','demo_start_balance_usd',float),'max_trade':('risk','demo_max_per_trade_usd',float),'max_positions':('risk','max_open_positions',int),
@@ -1248,7 +1325,9 @@ class Bot:
         if kind == 'reports':
             return {'inline_keyboard': [
                 [{'text':'📅 امروز', 'callback_data':'report_today'}, {'text':'7️⃣ هفته', 'callback_data':'report_weekly'}],
-                [{'text':'3️⃣0️⃣ ماه', 'callback_data':'report_monthly'}, {'text':'🔙 منوی اصلی', 'callback_data':'menu'}],
+                [{'text':'3️⃣0️⃣ ماه', 'callback_data':'report_monthly'}, {'text':'♾️ کل', 'callback_data':'report_all'}],
+                [{'text':'🚀 Early Listings', 'callback_data':'report_early'}, {'text':'🎯 فرصت‌ها', 'callback_data':'opportunities'}],
+                [{'text':'🔙 منوی اصلی', 'callback_data':'menu'}],
             ]}
         if kind == 'settings':
             return {'inline_keyboard': [
@@ -1300,7 +1379,7 @@ class Bot:
 
     def telegram_status_text(self):
         d=self.st['demo']; positions=self.st['demo'].get('positions',{})
-        return (f"🤖 Global Multi-Asset Bot V5.10.0\n\n"
+        return (f"🤖 Global Multi-Asset Bot V5.10.1\n\n"
                 f"Mode: DEMO\n"
                 f"Scanner: every {self.cfg['scanner']['interval_seconds']}s\n"
                 f"Last scan universe: {self.st.get('last_scan_universe',{}).get('count',0)} token(s)\n"
@@ -1353,16 +1432,16 @@ class Bot:
                 '/demo — وضعیت Demo\n'
                 '/demo_balance AMOUNT — تنظیم موجودی و ریست Demo\n'
                 '/demo_reset — ریست Demo\n'
-                '/today /daily /weekly /monthly — گزارش\n'
+                '/today /daily /weekly /monthly /report_all — گزارش عملکرد\n'
                 '/settings — تنظیمات\n'
                 '/set KEY VALUE — تغییر تنظیم قابل‌پشتیبانی\n'
                 '/panic /resume — توقف/ادامه\n'
-                '/live /arm CODE — وضعیت و ARM کردن Live')
+                '/early — گزارش شکار لیست‌های تازه\n/live /arm CODE — وضعیت و ARM کردن Live')
 
     def telegram_text(self,txt):
         txt=txt.strip()
         if txt in ('/start','/menu'):
-            return '🤖 Global Multi-Asset Bot V5.10.0\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
+            return '🤖 Global Multi-Asset Bot V5.10.1\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
         if txt=='/help': return self.telegram_help_text()
         if txt=='/status': return self.telegram_status_text()
         if txt=='/demo': return f"{self.demo_text()}\n\n{self.telegram_positions_text()}"
@@ -1382,6 +1461,8 @@ class Bot:
         if txt=='/daily': return '📅 امروز\n'+json.dumps(report(self.st,1),ensure_ascii=False)
         if txt=='/weekly': return '📊 هفته\n'+json.dumps(report(self.st,7),ensure_ascii=False)
         if txt=='/monthly': return '📈 ماه\n'+json.dumps(report(self.st,30),ensure_ascii=False)
+        if txt=='/report_all': return '📊 کل سابقه\n'+json.dumps(report(self.st,None),ensure_ascii=False)
+        if txt=='/early': return early_listing_report(self.st)
         if txt=='/panic': self.st['panic']=True; self.st['live_armed_until']=0; self.save(); return '🛑 PANIC STOP فعال شد.'
         if txt=='/resume': self.st['panic']=False; self.save(); return '✅ PANIC STOP خاموش شد. Live همچنان قفل است.'
         if txt=='/discover':
@@ -1431,7 +1512,7 @@ class Bot:
             finally:
                 self.st['manual_watchlist']=old; self.save()
         if txt=='/settings':
-            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; return (f"⚙️ SETTINGS V5.10.0\nMC ${f['min_market_cap']:,.0f}-${f['max_market_cap']:,.0f} | Liq ${f['min_liquidity']:,.0f} | Vol ${f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
+            f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; return (f"⚙️ SETTINGS V5.10.1\nMC ${f['min_market_cap']:,.0f}-${f['max_market_cap']:,.0f} | Liq ${f['min_liquidity']:,.0f} | Vol ${f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
                 f"Top10 {f['max_top10_pct']}%/{f.get('top10_hard_limit')}% | Largest {f['max_largest_holder_pct']}%/{f.get('largest_holder_hard_limit')}%\n"
                 f"Buy/Sell {f['min_buy_sell_ratio']} | 1H {f['max_1h_change']}% | 4H {f['min_4h_change']}% | Liq/MC {f['min_liquidity_mc_pct']}%\n"
                 f"Score Watch/Buy {sc['min_watch']}/{sc['min_buy_candidate']} | Tech {sc.get('min_tech_scan_score')} | Confirm {sg['required_confirmations']} | Entry cooldown {sg.get('entry_cooldown_minutes',0)}m\n"
@@ -1476,37 +1557,53 @@ class Bot:
         if data=='report_today': self.telegram_send(chat,self.telegram_text('/daily'),self.telegram_submenu('reports')); return
         if data=='report_weekly': self.telegram_send(chat,self.telegram_text('/weekly'),self.telegram_submenu('reports')); return
         if data=='report_monthly': self.telegram_send(chat,self.telegram_text('/monthly'),self.telegram_submenu('reports')); return
+        if data=='report_all': self.telegram_send(chat,self.telegram_text('/report_all'),self.telegram_submenu('reports')); return
+        if data=='report_early': self.telegram_send(chat,early_listing_report(self.st),self.telegram_submenu('reports')); return
         if data=='settings': self.telegram_send(chat,'⚙️ تنظیمات:',self.telegram_submenu('settings')); return
         if data=='settings_view': self.telegram_send(chat,self.telegram_text('/settings'),self.telegram_submenu('settings')); return
         if data=='settings_help': self.telegram_send(chat,'🛠 برای تغییر تنظیمات:\n/set KEY VALUE\n\nکلیدهای قابل تغییر در /settings و مستندات پروژه هستند.',self.telegram_submenu('settings')); return
         if data=='live': self.telegram_send(chat,'🔐 '+self.live_status()+'\n\nبرای ARM:\n/arm 123456',self.telegram_menu()); return
         if data=='panic': self.st['panic']=True; self.st['live_armed_until']=0; self.save(); self.telegram_send(chat,'🛑 PANIC STOP فعال شد.',self.telegram_menu()); return
 
+    def telegram_poll_once(self, max_updates=10):
+        """Process a bounded batch of Telegram updates for scheduled runners.
+        This keeps the public GitHub Actions runner usable without a permanent
+        polling process. State offset is persisted between runs.
+        """
+        token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
+        if not token or not self.cfg.get('telegram',{}).get('enabled',True): return 0
+        processed=0
+        try:
+            x=self.api.s.get(TG.format(token,'getUpdates'),params={'timeout':1,'offset':self.st.get('telegram_offset',0),'allowed_updates':json.dumps(['message','callback_query'])},timeout=8).json()
+            if not x.get('ok',True): return 0
+            for u in (x.get('result') or [])[:max(1,int(max_updates))]:
+                self.st['telegram_offset']=u['update_id']+1; processed+=1
+                if u.get('callback_query'):
+                    self.telegram_callback(u['callback_query']); continue
+                m=u.get('message') or {}; chat=m.get('chat',{}).get('id'); text=(m.get('text') or '').strip()
+                if not chat or not self.allowed_chat(chat): continue
+                if text=='/scan':
+                    self.telegram_send(chat,'⏳ اسکن در حال انجام است...',self.telegram_menu())
+                    try:
+                        results=self.scan(); msg='📊 SCAN COMPLETE\\n\\n'+'\\n\\n'.join(f"• {r.get('name')} — {r.get('verdict')} — {r.get('score','?')}/100" for r in results)
+                    except Exception as e: msg='❌ خطا در اسکن: '+str(e)
+                    self.telegram_send(chat,msg,self.telegram_menu())
+                else:
+                    msg=self.telegram_text(text)
+                    keyboard=self.telegram_menu() if text in ('/start','/menu','/status','/help','/panic','/resume') else None
+                    self.telegram_send(chat,msg,keyboard)
+            self.save()
+        except Exception as e:
+            log.warning('telegram poll once: %s',e)
+        return processed
+
     def telegram_loop(self):
         token=os.getenv('TELEGRAM_BOT_TOKEN','').strip()
         if not token: raise RuntimeError('TELEGRAM_BOT_TOKEN missing')
         self.telegram_send(self.telegram_targets()[0] if self.telegram_targets() else None,self.telegram_text('/start'),self.telegram_menu())
         while True:
-            try:
-                x=self.api.s.get(TG.format(token,'getUpdates'),params={'timeout':25,'offset':self.st.get('telegram_offset',0),'allowed_updates':json.dumps(['message','callback_query'])},timeout=35).json()
-                for u in x.get('result',[]):
-                    self.st['telegram_offset']=u['update_id']+1
-                    if u.get('callback_query'):
-                        self.telegram_callback(u['callback_query']); continue
-                    m=u.get('message') or {}; chat=m.get('chat',{}).get('id'); text=(m.get('text') or '').strip()
-                    if not chat or not self.allowed_chat(chat): continue
-                    if text=='/scan':
-                        self.telegram_send(chat,'⏳ اسکن در حال انجام است...',self.telegram_menu())
-                        try:
-                            results=self.scan(); msg='📊 SCAN COMPLETE\n\n'+'\n\n'.join(f"• {r.get('name')} — {r.get('verdict')} — {r.get('score','?')}/100" for r in results)
-                        except Exception as e: msg='❌ خطا در اسکن: '+str(e)
-                        self.telegram_send(chat,msg,self.telegram_menu())
-                    else:
-                        msg=self.telegram_text(text)
-                        keyboard=self.telegram_menu() if text in ('/start','/menu','/status','/help','/panic','/resume') else None
-                        self.telegram_send(chat,msg,keyboard)
-                self.save()
-            except Exception as e: log.warning('telegram loop: %s',e); time.sleep(5)
+            self.telegram_poll_once(max_updates=20)
+            time.sleep(1)
 
 def main():
     import argparse
@@ -1515,7 +1612,9 @@ def main():
     b=Bot(args.config,args.state)
     if args.telegram: b.telegram_loop(); return
     if args.once:
-        print(json.dumps(b.scan(),ensure_ascii=False,indent=2)); return
+        print(json.dumps(b.scan(),ensure_ascii=False,indent=2))
+        b.telegram_poll_once(max_updates=10)
+        return
     while True:
         b.scan(); time.sleep(int(b.cfg['scanner']['interval_seconds']))
 

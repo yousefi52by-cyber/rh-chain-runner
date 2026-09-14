@@ -4,7 +4,7 @@ spec=importlib.util.spec_from_file_location('bot','03_rh_chain_bot_v4.py')
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 cfg=json.load(open('01_config.example.json'))
 cfg['macro_markets']['gold']['enabled']=False
-assert cfg['app']['version']=='5.10.0'
+assert cfg['app']['version']=='5.10.2'
 assert cfg['scanner']['max_tokens_per_scan']==0
 assert cfg['discovery']['candidate_pool_per_scan']==120
 assert cfg['discovery']['watchlist_size']==50
@@ -15,7 +15,7 @@ assert cfg['filters']['hard_min_liquidity']==10000
 assert cfg['risk']['dynamic_sizing'] is True
 assert cfg['risk']['allocation_per_trade_pct']==25.0
 assert cfg['risk']['max_portfolio_allocation_pct']==75.0
-assert cfg['early_listing']['auto_demo_buy'] is False
+assert cfg['early_listing']['auto_demo_buy'] is True
 assert cfg['early_listing']['max_demo_entry_usd']==5
 
 base={'name':'TEST','address':'0x'+'1'*40,'market_cap':3700000,'liquidity':232500,'volume_24h':3100000,'holders':2111,'top10_pct':20,'largest_holder_pct':10,'change_1h':12,'change_4h':8,'buys':219,'sells':164}
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory() as d:
             return []
     b.api=FeedAPI(cfg); got,cursor=b.api.discover(3,None); assert {x['name'] for x in got}=={'P1','B1','T1'} and cursor is None,(got,cursor)
 
-# V5.10.0: configured/manual watch items are NOT priority-scanned. They share
+# V5.10.2: configured/manual watch items are NOT priority-scanned. They share
 # the normal opportunity queue and must not monopolize the deep-scan budget.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; local=json.loads(json.dumps(cfg)); local['watchlist']=[{'name':'JUG','address':'0x'+'c'*40},{'name':'SPACE','address':'0x'+'d'*40}]; local['discovery']['candidate_pool_per_scan']=6; local['discovery']['deep_scan_candidates_per_scan']=3; local['early_listing']['enabled']=False; cp.write_text(json.dumps(local))
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory() as d:
     assert b.st['last_scan_universe']['queue_size']==8, b.st['last_scan_universe']
     assert b.st['last_scan_universe']['priority_batch']==0, b.st['last_scan_universe']
 
-# V5.10.0: consecutive confirmations are capped and reset on a failed pass.
+# V5.10.2: consecutive confirmations are capped and reset on a failed pass.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; local=json.loads(json.dumps(cfg)); local['watchlist']=[{'name':'CAP','address':'0x'+'e'*40}]; local['discovery']['enabled']=False; local['signal']['required_confirmations']=2; cp.write_text(json.dumps(local))
     b=m.Bot(str(cp),str(sp))
@@ -139,7 +139,7 @@ with tempfile.TemporaryDirectory() as d:
     cap.gecko_technical=broken
     out=b.scan(); assert out and out[0]['confirmations']==0, out
 
-print('V5.10.0 BASE AUDIT TESTS OK')
+print('V5.10.2 BASE AUDIT TESTS OK')
 
 # Deep technical scan can reuse the Dex pair from snapshot and therefore avoid a
 # Gecko pools request on the normal path.
@@ -157,7 +157,7 @@ class PairAPI:
 pair_api=PairAPI(); rows,pool=pair_api.gecko_technical('0x'+'a'*40,'0x'+'9'*40,'base'); assert len(rows)==220 and pair_api.gecko_calls==[('0x'+'9'*40,'base')]
 
 
-# V5.10.0: Gecko 429 is not immediately retried; it enters a bounded cooldown.
+# V5.10.2: Gecko 429 is not immediately retried; it enters a bounded cooldown.
 class Resp:
     def __init__(self,status,headers=None,payload=None): self.status_code=status; self.headers=headers or {}; self._payload=payload
     def json(self): return self._payload
@@ -175,7 +175,7 @@ except RuntimeError as e:
     assert '429' in str(e)
 assert api.s.calls==1 and api.gecko_backoff_until>0
 
-# V5.10.0: normal technical path must not call Gecko /tokens/.../pools after a
+# V5.10.2: normal technical path must not call Gecko /tokens/.../pools after a
 # DexScreener pair is supplied; this is the regression that caused unnecessary
 # Gecko pressure in the real scan.
 class PairOnlyAPI(m.API):
@@ -187,7 +187,7 @@ class PairOnlyAPI(m.API):
 pa=PairOnlyAPI(cfg); rows,pool=pa.gecko_technical('0x'+'a'*40,'0x'+'9'*40,'base')
 assert len(rows)==220 and pool=='0x'+'9'*40
 
-# V5.10.0: invalid/missing Dex pair metadata may use Gecko pool discovery as fallback.
+# V5.10.2: invalid/missing Dex pair metadata may use Gecko pool discovery as fallback.
 class FallbackAPI(m.API):
     def __init__(self,cfg): pass
     def gecko_pools(self,a):
@@ -198,7 +198,7 @@ class FallbackAPI(m.API):
 fa=FallbackAPI(cfg); rows,pool=fa.gecko_technical('0x'+'a'*40,None,None)
 assert len(rows)==220 and pool=='0x'+'9'*40
 
-# V5.10.0: on-chain discovery must contribute tokens even when Dex feeds do not.
+# V5.10.2: on-chain discovery must contribute tokens even when Dex feeds do not.
 class OnchainFeedAPI(m.API):
     def __init__(self,cfg): self.cfg=cfg
     def get(self,url,params=None,cache_ttl=None):
@@ -212,11 +212,11 @@ class OnchainFeedAPI(m.API):
         return {}
 onc=OnchainFeedAPI(cfg); got,cursor=onc.discover(2,None); assert {x['name'] for x in got}=={'ONCHAIN','ACTIVE'} and cursor is None,(got,cursor)
 
-print('V5.10.0 FULL TESTS OK')
+print('V5.10.2 FULL TESTS OK')
 
-print('V5.10.0 FULL TESTS OK')
+print('V5.10.2 FULL TESTS OK')
 
-# V5.10.0: Blockscout token pagination is deliberately one page per scan; stale
+# V5.10.2: Blockscout token pagination is deliberately one page per scan; stale
 # cursors from prior runs are ignored so the scanner never emits the repeated 422.
 class CursorFeedAPI(OnchainFeedAPI):
     def get(self,url,params=None,cache_ttl=None):
@@ -228,7 +228,7 @@ class CursorFeedAPI(OnchainFeedAPI):
         return {}
 ca=CursorFeedAPI(cfg); got,cursor=ca.discover(2,{'page_key':'STALE'}); assert got[0]['name']=='PAGE1' and cursor is None,(got,cursor)
 
-# V5.10.0: capital allocation is explicit and risk-based. With $20, an 8% stop
+# V5.10.2: capital allocation is explicit and risk-based. With $20, an 8% stop
 # targets 25%/$5 per trade while risking at most 2%/$0.40. Three positions can
 # use at most 75% of equity; a fourth is blocked by max_open_positions.
 st=m.default_state(cfg); info=base|{'price':1.0,'suggested_stop_pct':8,'setup_type':'BREAKOUT'}
@@ -241,7 +241,7 @@ ii=dict(info); ii['address']='0x'+'3ff'+'0'*37; tid,why=m.risk_buy(st,cfg,ii,Non
 # Wider stop automatically reduces allocation to preserve the 2% equity risk cap.
 st2=m.default_state(cfg); ii=info|{'suggested_stop_pct':15}; tid,why=m.risk_buy(st2,cfg,ii,None); assert tid and round(st2['demo']['positions'][ii['address']]['invested'],2)==2.67,(tid,why,st2)
 
-# V5.10.0: opportunity alerts surface BUY CANDIDATE/WATCH ideas even when entry is
+# V5.10.2: opportunity alerts surface BUY CANDIDATE/WATCH ideas even when entry is
 # not ready, and dedupe the same idea during the cooldown.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; local=json.loads(json.dumps(cfg)); local['watchlist']=[]; local['signal']['telegram_opportunity_alerts']=True; cp.write_text(json.dumps(local))
@@ -252,7 +252,7 @@ with tempfile.TemporaryDirectory() as d:
     opp2=dict(opp); opp2['score']=76; msgs=b._opportunity_messages([opp2],now+120); assert len(msgs)==0
 
 
-# V5.10.0: the deep budget reserves slots for newly created pairs so discovery
+# V5.10.2: the deep budget reserves slots for newly created pairs so discovery
 # is not monopolized by established high-ranked opportunities.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; local=json.loads(json.dumps(cfg)); local['watchlist']=[]; local['discovery']['candidate_pool_per_scan']=4; local['discovery']['deep_scan_candidates_per_scan']=3; local['discovery']['early_listing_reserve']=1; local['early_listing']['candidate_max_age_minutes']=5; cp.write_text(json.dumps(local))
@@ -269,10 +269,10 @@ with tempfile.TemporaryDirectory() as d:
         out=b.scan()
     assert any(x['name']=='EARLY' for x in out),[x['name'] for x in out]
 
-print('V5.10.0 FULL TESTS OK')
+print('V5.10.2 FULL TESTS OK')
 
 
-# V5.10.0: global Dex discovery accepts multiple major chains, not only Robinhood.
+# V5.10.2: global Dex discovery accepts multiple major chains, not only Robinhood.
 class GlobalFeedAPI(m.API):
     def __init__(self,cfg): self.cfg=cfg
     def get(self,url,params=None,cache_ttl=None):
@@ -287,7 +287,7 @@ class GlobalFeedAPI(m.API):
         return {}
 gf=GlobalFeedAPI(cfg); got,_=gf.discover(10,None); assert {x['chain_id'] for x in got}=={'solana','ethereum','robinhood'},got
 
-# V5.10.0: Gold is a first-class commodity radar asset and uses technical scoring,
+# V5.10.2: Gold is a first-class commodity radar asset and uses technical scoring,
 # without crypto market-cap/holder gates.
 local=json.loads(json.dumps(cfg)); local['macro_markets']['gold']['enabled']=True; local['watchlist']=[]
 with tempfile.TemporaryDirectory() as d:
@@ -303,7 +303,7 @@ with tempfile.TemporaryDirectory() as d:
     assert out[0]['verdict'] in ('BUY CANDIDATE','WATCH'),out[0]
 
 
-# V5.10.0 runtime hardening: Bot never reuses a persisted Blockscout cursor across runs.
+# V5.10.2 runtime hardening: Bot never reuses a persisted Blockscout cursor across runs.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; local=json.loads(json.dumps(cfg)); local['watchlist']=[]; local['discovery']['candidate_pool_per_scan']=1; cp.write_text(json.dumps(local))
     stale=m.default_state(local); stale['blockscout_token_cursor']={'name':'STALE'}; sp.write_text(json.dumps(stale))
@@ -314,7 +314,7 @@ with tempfile.TemporaryDirectory() as d:
         def discovery_rank(self,item): return None
     b.api=CursorAPI(); b.scan(); assert b.api.args==[None],b.api.args
 
-# V5.10.0: a failed primary Gecko pool is followed by one bounded fallback pool.
+# V5.10.2: a failed primary Gecko pool is followed by one bounded fallback pool.
 class GeckoFallbackAPI(m.API):
     def __init__(self,cfg): self.cfg=cfg; self.calls=[]
     def get(self,url,params=None,cache_ttl=None):
@@ -327,39 +327,39 @@ class GeckoFallbackAPI(m.API):
         raise RuntimeError('unexpected URL '+url)
 gfa=GeckoFallbackAPI(cfg); rows,pool=gfa.gecko_technical('0x'+'a'*40,'PRIMARY','base','robinhood'); assert len(rows)==220 and pool=='0xGOOD',gfa.calls
 
-# V5.10.0: RETEST is not entry-ready until resistance is actually reclaimed.
+# V5.10.2: RETEST is not entry-ready until resistance is actually reclaimed.
 rt={'close':99.0,'ema20':98.0,'ema50':97.0,'ema200':95.0,'rsi14':60.0,'atr_pct':3.0,'resistance':100.0,'support':95.0,'breakout_pct':-1.0,'volume_ratio':1.5,'higher_high':True,'higher_low':True,'lower_high':False,'lower_low':False,'candles':220}
 setup,zone,_=m.classify_setup(rt,cfg); assert setup=='RETEST',(setup,zone)
 assert not (zone and zone[0] <= 99.0 <= zone[1] and 99.0 >= 100.0)
 rt2=dict(rt); rt2['close']=100.2; rt2['breakout_pct']=0.2
 setup2,zone2,_=m.classify_setup(rt2,cfg); assert setup2=='BREAKOUT',setup2
 
-print('V5.10.0 RUNTIME HARDENING TESTS OK')
+print('V5.10.2 RUNTIME HARDENING TESTS OK')
 
-print('V5.10.0 GLOBAL MULTI-ASSET TESTS OK')
+print('V5.10.2 GLOBAL MULTI-ASSET TESTS OK')
 
 
-# V5.10.0: Telegram discovery unwraps the (items, cursor) tuple and never iterates None.
+# V5.10.2: Telegram discovery unwraps the (items, cursor) tuple and never iterates None.
 with tempfile.TemporaryDirectory() as d:
     cp=Path(d)/'config.json'; sp=Path(d)/'state.json'; cp.write_text(json.dumps(cfg)); b=m.Bot(str(cp),str(sp))
     class TgAPI:
         def discover(self,n,cursor=None): return ([{'name':'ONE','address':'0x'+'1'*40,'chain_id':'robinhood'}], None)
     b.api=TgAPI(); text=b.telegram_text('/discover'); assert 'ONE' in text and 'DISCOVERY' in text
 
-# V5.10.0: Telegram opportunity/risk views are available and main menu exposes them.
+# V5.10.2: Telegram opportunity/risk views are available and main menu exposes them.
 b.st['daily_watch']=[{'name':'ONE','verdict':'BUY CANDIDATE','score':88,'setup_type':'BREAKOUT','entry_ready':True}]
 assert 'BUY CANDIDATE' in b.telegram_text('/opportunities')
 assert 'RISK' in b.telegram_text('/risk')
 menu=str(b.telegram_menu()); assert 'opportunities' in menu and 'risk' in menu
 
-print('V5.10.0 TELEGRAM STRUCTURE TESTS OK')
+print('V5.10.2 TELEGRAM STRUCTURE TESTS OK')
 
-# V5.10.0: the real GitHub Actions workflow path/version must match the code/config.
+# V5.10.2: the real GitHub Actions workflow path/version must match the code/config.
 wf_path=Path('.github/workflows/SCANNER_WORKFLOW.yml')
 assert wf_path.exists(), 'missing .github/workflows/SCANNER_WORKFLOW.yml'
 wf=wf_path.read_text()
-assert 'Global Multi-Asset Scanner V5.10.0' in wf
-assert 'global-multi-asset-state-v5.10.0-' in wf
+assert 'Global Multi-Asset Scanner V5.10.2' in wf
+assert 'global-multi-asset-state-v5.10.2-' in wf
 assert wf.index('Run regression tests') < wf.index('Run scanner')
 assert 'python 03_rh_chain_bot_v4.py --config config.json --state state.json --once' in wf
-print('V5.10.0 WORKFLOW ALIGNMENT TESTS OK')
+print('V5.10.2 WORKFLOW ALIGNMENT TESTS OK')
