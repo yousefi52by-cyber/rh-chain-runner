@@ -1483,6 +1483,24 @@ class Bot:
         self.st['live_armed_until']=time.time()+seconds; self.save()
         return f'🔓 Live فقط برای {seconds} ثانیه Arm شد. اجرای واقعی همچنان به آداپتر قفل‌شده وابسته است.'
 
+    def allowed_chat(self, chat):
+        """Authorize Telegram control messages using the configured chat ID.
+        The runner supplies TELEGRAM_CHAT_ID as a secret; admin_chat_ids can
+        optionally contain additional authorized chat IDs. Empty config does not
+        disable the secret-based authorization.
+        """
+        target=str(chat).strip()
+        if not target:
+            return False
+        allowed=set()
+        env_chat=os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if env_chat:
+            allowed.add(env_chat)
+        admins=self.cfg.get("telegram",{}).get("admin_chat_ids",[])
+        if isinstance(admins,list):
+            allowed.update(str(x).strip() for x in admins if str(x).strip())
+        return target in allowed
+
     def telegram_menu(self):
         return {
             'inline_keyboard': [
