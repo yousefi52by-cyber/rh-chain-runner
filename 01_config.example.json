@@ -1,13 +1,13 @@
 {
   "app": {
-    "version": "5.11.1",
+    "version": "5.12.0",
     "chain": "robinhood",
     "chain_id": 4663,
     "mode": "GLOBAL_MULTI_ASSET",
-    "state_schema": "5.11.1"
+    "state_schema": "5.12.0"
   },
   "scanner": {
-    "interval_seconds": 300,
+    "interval_seconds": 600,
     "timeout_seconds": 8,
     "max_retries": 1,
     "max_tokens_per_scan": 0
@@ -18,7 +18,7 @@
     "daily_watch_limit": 50,
     "max_persistent_watchlist": 20,
     "candidate_pool_per_scan": 160,
-    "deep_scan_candidates_per_scan": 8,
+    "deep_scan_candidates_per_scan": 4,
     "early_listing_reserve": 4,
     "watchlist_size": 50,
     "deep_rescan_seconds": 300,
@@ -48,9 +48,9 @@
   },
   "data": {
     "max_age_seconds": 900,
-    "gecko_rate_limit_per_minute": 6,
+    "gecko_rate_limit_per_minute": 8,
     "require_fresh_market_data": true,
-    "cache_ttl_seconds": 60
+    "cache_ttl_seconds": 300
   },
   "filters": {
     "min_market_cap": 1500000,
@@ -129,7 +129,9 @@
     "partial_tp_fraction": 0.5,
     "allocation_per_trade_pct": 25.0,
     "max_portfolio_allocation_pct": 75.0,
-    "commodity_max_allocation_pct": 25.0
+    "commodity_max_allocation_pct": 25.0,
+    "demo_fee_pct": 0.1,
+    "demo_slippage_pct": 0.15
   },
   "telegram": {
     "admin_chat_ids": [],

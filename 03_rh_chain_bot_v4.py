@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Global Multi-Asset Trader V5.11.1. Opportunity-first scanner/demo/Telegram controller.
+"""Global Multi-Asset Trader V5.12.0 FINAL. Opportunity-first scanner/demo/Telegram controller.
 Live trading is intentionally locked; no private key is accepted or stored.
 """
 import json, os, re, time, uuid, logging, threading, base64, hashlib, hmac, struct, math
@@ -14,7 +14,7 @@ GECKO='https://api.geckoterminal.com/api/v2'
 BLOCKSCOUT='https://api.blockscout.com/4663/api/v2'
 TG='https://api.telegram.org/bot{}/{}'
 CHAIN='robinhood'; CHAIN_ID=4663
-UA='Global-Trader-V5.11.1/1.0'
+UA='Global-Trader-V5.12.0/1.0'
 # DexScreener chain IDs -> GeckoTerminal network slugs for deep technical OHLCV.
 GECKO_NETWORKS={
     'ethereum':'eth','solana':'solana','bsc':'bsc','base':'base','arbitrum':'arbitrum','polygon':'polygon_pos',
@@ -44,7 +44,7 @@ def atomic_json(path, obj):
 
 def default_state(cfg):
     d=datetime.now(timezone.utc).date().isoformat()
-    return {'version':'5.11.1','state_schema':'5.11.1','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
+    return {'version':'5.12.0','state_schema':'5.12.0','panic':False,'live_armed_until':0,'confirmations':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},
       'watchlist':[],'manual_watchlist':[],'daily_watch':[],'daily_watch_date':d,'telegram_offset':0,'last_scan_universe':{},'entry_cooldowns':{},
       'opportunity_queue':{},'settings_overrides':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,
       'demo':{'cash':float(cfg['risk']['demo_start_balance_usd']),'positions':{},'realized_pnl':0.0,'trades':[]},
@@ -63,7 +63,7 @@ class API:
         self.s=requests.Session()
         self.s.headers.update({'User-Agent':UA,'Accept':'application/json'})
         self.blockscout_key=os.getenv('BLOCKSCOUT_API_KEY','').strip()
-        self.gecko_limit=max(1,min(20,int(cfg.get('data',{}).get('gecko_rate_limit_per_minute',20))))
+        self.gecko_limit=max(1,min(20,int(cfg.get('data',{}).get('gecko_rate_limit_per_minute',8))))
         self.gecko_calls=deque()
         self.gecko_backoff_until=0.0
         self.cache={}
@@ -162,7 +162,7 @@ class API:
 
     def gecko_pools(self,a,chain_id=CHAIN):
         network=GECKO_NETWORKS.get(str(chain_id),str(chain_id))
-        x=self.get(f'{GECKO}/networks/{network}/tokens/{a}/pools',{'include':'base_token,quote_token'},cache_ttl=60)
+        x=self.get(f'{GECKO}/networks/{network}/tokens/{a}/pools',{'include':'base_token,quote_token'},cache_ttl=300)
         return x.get('data',[]) if isinstance(x,dict) else []
 
     @staticmethod
@@ -198,7 +198,7 @@ class API:
             side=self._pool_token_side(pool,a) or 'base'
             try:
                 x=self.get(f'{GECKO}/networks/{network}/pools/{pa}/ohlcv/hour',
-                           {'aggregate':1,'limit':8,'currency':'usd','token':side},cache_ttl=60)
+                           {'aggregate':1,'limit':8,'currency':'usd','token':side},cache_ttl=300)
                 rows=(((x.get('data') or {}).get('attributes') or {}).get('ohlcv_list') or [])
                 rows=[r for r in rows if isinstance(r,(list,tuple)) and len(r)>=5]
                 rows.sort(key=lambda r:float(r[0]),reverse=True)
@@ -241,22 +241,22 @@ class API:
         pa,side=candidates[0]
         try:
             x=self.get(f'{GECKO}/networks/{network}/pools/{pa}/ohlcv/hour',
-                       {'aggregate':1,'limit':220,'currency':'usd','token':side},cache_ttl=60)
+                       {'aggregate':1,'limit':220,'currency':'usd','token':side},cache_ttl=300)
             rows=(((x.get('data') or {}).get('attributes') or {}).get('ohlcv_list') or []) if isinstance(x,dict) else []
             rows=[r for r in rows if isinstance(r,(list,tuple)) and len(r)>=6]
             rows.sort(key=lambda r:float(r[0]))
-            if len(rows)>=200: return rows,pa
+            if len(rows)>=int((getattr(self,'cfg',{}) or {}).get('score',{}).get('min_technical_candles',60) or 60): return rows,pa
             raise RuntimeError(f'insufficient Gecko technical OHLCV ({len(rows)})')
         except RuntimeError as e:
-            if pair_address and '404' in str(e):
+            if pair_address and ('404' in str(e) or 'insufficient Gecko technical OHLCV' in str(e)):
                 add_best_pool()
                 pa,side=candidates[-1]
                 x=self.get(f'{GECKO}/networks/{network}/pools/{pa}/ohlcv/hour',
-                           {'aggregate':1,'limit':220,'currency':'usd','token':side},cache_ttl=60)
+                           {'aggregate':1,'limit':220,'currency':'usd','token':side},cache_ttl=300)
                 rows=(((x.get('data') or {}).get('attributes') or {}).get('ohlcv_list') or []) if isinstance(x,dict) else []
                 rows=[r for r in rows if isinstance(r,(list,tuple)) and len(r)>=6]
                 rows.sort(key=lambda r:float(r[0]))
-                if len(rows)>=200: return rows,pa
+                if len(rows)>=int((getattr(self,'cfg',{}) or {}).get('score',{}).get('min_technical_candles',60) or 60): return rows,pa
                 raise RuntimeError(f'insufficient Gecko technical OHLCV ({len(rows)})')
             raise
     @staticmethod
@@ -331,12 +331,33 @@ class API:
             base_address=((p.get('baseToken') or {}).get('address') or '')
             s['pair_address']=pair_address if str(pair_address or '').strip() else None
             s['token_side']='base' if str(base_address).lower()==str(a).lower() else 'quote'
-        except Exception as e: s['errors'].append('dex:'+str(e))
+        except Exception as e:
+            s['errors'].append('dex:'+str(e))
+            # Final fallback: a fresh/active Gecko pool can still provide enough
+            # market data to rank a token when DexScreener has not indexed the pair.
+            # This is especially important for newly launched cross-chain assets.
+            try:
+                if asset_class=='crypto':
+                    pools=self.gecko_pools(a,chain_id)
+                    def _rank_pool(pool):
+                        attrs=pool.get('attributes') or {}; reserve=float(attrs.get('reserve_in_usd') or 0); vol=attrs.get('volume_usd') or {}; v24=float(vol.get('h24') or 0) if isinstance(vol,dict) else 0
+                        return reserve*0.75+v24*0.25
+                    pool=max(pools,key=_rank_pool) if pools else None
+                    if pool:
+                        attrs=pool.get('attributes') or {}; reserve=float(attrs.get('reserve_in_usd') or 0); vol=attrs.get('volume_usd') or {}; v24=float(vol.get('h24') or 0) if isinstance(vol,dict) else 0
+                        price=float(attrs.get('base_token_price_usd') or attrs.get('quote_token_price_usd') or 0)
+                        s.update(price=price,liquidity=reserve,volume_24h=v24,buys=0,sells=0)
+                        s['gecko_pool_fallback']=True
+                        s['token_side']=self._pool_token_side(pool,a) or 'base'
+                        pid=str(pool.get('id','')); s['pair_address']=pid.rsplit('_',1)[-1] if pid else None
+                        s['errors']=[x for x in s['errors'] if not str(x).startswith('dex:no DexScreener pair')]
+            except Exception as ge:
+                s['errors'].append('gecko_fallback:'+str(ge))
         if include_4h:
             try:s['change_4h'],s['pool']=self.gecko_4h(a,chain_id)
             except Exception as e:s['change_4h']=None;s['errors'].append('gecko_4h:'+str(e))
         else:s['change_4h']=None
-        if str(chain_id)=='robinhood':
+        if str(chain_id)=='robinhood' and ADDR_RE.match(str(a)):
             h,t,l,he=self.holders(a); s.update(holders=h,top10_pct=t,largest_holder_pct=l); s['errors'].extend(he)
         else:
             s.update(holders=None,top10_pct=None,largest_holder_pct=None)
@@ -709,14 +730,22 @@ def score(s,cfg):
     if vol is None: miss.append('volume_24h')
     elif vol>=f['min_volume_24h']: pts+=w['volume']
     else: pts+=w['volume']*min(1.0, max(0.0, vol/f['min_volume_24h']))
-    if h is None: miss.append('holders')
+    if h is None:
+        # Holder/concentration data is currently authoritative on Robinhood Chain
+        # via Blockscout. It is optional for the other supported discovery chains;
+        # otherwise GLOBAL_MULTI_ASSET would classify every non-Robinhood token as
+        # DATA_INCOMPLETE even when price/liquidity/volume/technical data is usable.
+        if str(s.get('chain_id') or CHAIN) == CHAIN: miss.append('holders')
+        else: reasons.append('holders_unavailable_non_robinhood')
     elif h>=f['min_holders']: pts+=w['holders']
     else: pts+=w['holders']*min(1.0, max(0.0, h/f['min_holders']))
 
     # Holder concentration: target limits earn full points; excess is a penalty,
     # with only extreme concentration becoming a hard rejection.
     top_hard=float(f.get('top10_hard_limit', max(60.0, float(f['max_top10_pct'])*2)))
-    if top is None: miss.append('top10_pct')
+    if top is None:
+        if str(s.get('chain_id') or CHAIN) == CHAIN: miss.append('top10_pct')
+        else: reasons.append('top10_unavailable_non_robinhood')
     elif top<=f['max_top10_pct']:
         pts+=w['top10']
     elif top<top_hard:
@@ -727,7 +756,9 @@ def score(s,cfg):
         hard=True; reasons.append('top10_extreme'); risk_flags.append('EXTREME_CONCENTRATION')
 
     largest_hard=float(f.get('largest_holder_hard_limit', max(35.0, float(f['max_largest_holder_pct'])*2)))
-    if largest is None: miss.append('largest_holder_pct')
+    if largest is None:
+        if str(s.get('chain_id') or CHAIN) == CHAIN: miss.append('largest_holder_pct')
+        else: reasons.append('largest_holder_unavailable_non_robinhood')
     elif largest<=f['max_largest_holder_pct']:
         pts+=w['largest']
     elif largest<largest_hard:
@@ -804,8 +835,11 @@ def score(s,cfg):
 def _portfolio_equity(st):
     d=st.get('demo',{})
     cash=float(d.get('cash',0) or 0)
-    invested=sum(float(p.get('invested',0) or 0) for p in (d.get('positions',{}) or {}).values())
-    return max(0.0,cash+invested)
+    marked=0.0
+    for p in (d.get('positions',{}) or {}).values():
+        qty=float(p.get('qty',0) or 0); px=float(p.get('last_price') or p.get('entry') or 0)
+        marked += max(0.0,qty*px)
+    return max(0.0,cash+marked)
 
 def _demo_amount(st,cfg,info):
     """Professional position sizing: allocation target + hard risk cap.
@@ -845,16 +879,22 @@ def risk_buy(st,cfg,info,amount=None):
     if amount<=0:return None,'trade/cash/portfolio limit'
     price=float(info.get('price') or 0)
     if price<=0:return None,'invalid price'
+    fee_pct=max(0.0,float(r.get('demo_fee_pct',0.10))); slip_pct=max(0.0,float(r.get('demo_slippage_pct',0.15)))
+    entry_price=price*(1+slip_pct/100.0)
     stop_pct=float(info.get('suggested_stop_pct') or r.get('stop_loss_pct',8)); stop_pct=max(0.25,stop_pct)
-    risk_usd=amount*(stop_pct/100.0)
     max_risk_usd=equity*float(r.get('risk_per_trade_pct',2.0))/100.0
-    if risk_usd>max_risk_usd+1e-9:
-        amount=min(amount,max_risk_usd/(stop_pct/100.0))
-    if amount<=0:return None,'risk limit'
+    amount=min(amount,max_risk_usd/(stop_pct/100.0))
+    # Fees are part of the cash budget; keep the trade allocation itself unchanged.
+    cash_budget=float(st['demo']['cash'])
+    amount=min(amount,cash_budget/(1+fee_pct/100.0))
+    if amount<=0:return None,'insufficient cash/risk budget'
+    entry_fee=amount*fee_pct/100.0
+    total_cost=amount+entry_fee
+    risk_usd=amount*(stop_pct/100.0)
     tid='D-'+uuid.uuid4().hex[:10]
-    stop_price=price*(1-stop_pct/100)
-    st.setdefault('entry_cooldowns',{})[a]=time.time(); st['demo']['cash']-=amount
-    st['demo']['positions'][a]={'trade_id':tid,'name':info['name'],'address':info['address'],'qty':amount/price,'entry':price,'invested':amount,'opened_at':time.time(),'high':price,'score':info.get('score'),'setup_type':info.get('setup_type','UNKNOWN'),'entry_zone':info.get('entry_zone'),'stop_price':stop_price,'partial_taken':False,'be_price':price*(1+float(r.get('break_even_trigger_pct',5))/100),'risk_at_stop_usd':risk_usd,'allocation_pct':amount/equity*100 if equity else 0}
+    stop_price=entry_price*(1-stop_pct/100)
+    st.setdefault('entry_cooldowns',{})[a]=time.time(); st['demo']['cash']-=total_cost
+    st['demo']['positions'][a]={'trade_id':tid,'name':info['name'],'address':info['address'],'chain_id':info.get('chain_id') or CHAIN,'asset_class':info.get('asset_class') or 'crypto','qty':amount/entry_price,'entry':entry_price,'invested':total_cost,'opened_at':time.time(),'high':entry_price,'last_price':entry_price,'entry_fee':entry_fee,'score':info.get('score'),'setup_type':info.get('setup_type','UNKNOWN'),'entry_zone':info.get('entry_zone'),'stop_price':stop_price,'partial_taken':False,'be_price':entry_price*(1+float(r.get('break_even_trigger_pct',5))/100),'risk_at_stop_usd':risk_usd,'allocation_pct':amount/equity*100 if equity else 0}
     st['today']['trades']+=1
     return tid,'OK'
 
@@ -864,19 +904,19 @@ def risk_sell(st,cfg,a,price,reason,qty=None):
     qty=float(p['qty'] if qty is None else min(qty,p['qty']))
     if qty<=0:return None,'invalid qty'
     invested_piece=float(p['invested'])*(qty/float(p['qty']))
-    proceeds=qty*price; pnl=proceeds-invested_piece; st['demo']['cash']+=proceeds; st['demo']['realized_pnl']+=pnl
+    slip_pct=float(cfg['risk'].get('demo_slippage_pct',0.15)); fee_pct=float(cfg['risk'].get('demo_fee_pct',0.10)); exit_price=price*(1-max(0.0,slip_pct)/100.0); gross_proceeds=qty*exit_price; fee=gross_proceeds*max(0.0,fee_pct)/100.0; proceeds=gross_proceeds-fee; pnl=proceeds-invested_piece; st['demo']['cash']+=proceeds; st['demo']['realized_pnl']+=pnl
     if qty>=float(p['qty'])*0.999999:
         del st['demo']['positions'][a.lower()]
     else:
         p['qty']-=qty; p['invested']-=invested_piece
     if pnl<0: st['today']['loss']+=abs(pnl)
-    tr={**p,'qty_closed':qty,'exit':price,'proceeds':proceeds,'pnl':pnl,'pnl_pct':pnl/invested_piece*100 if invested_piece else 0,'reason':reason,'closed_at':time.time()}
+    tr={**p,'qty_closed':qty,'exit':exit_price,'proceeds':proceeds,'exit_fee':fee,'pnl':pnl,'pnl_pct':pnl/invested_piece*100 if invested_piece else 0,'reason':reason,'closed_at':time.time()}
     st['demo']['trades'].append(tr); return tr,'OK'
 
 def manage_position(st,cfg,info):
     a=info['address'].lower(); p=st['demo']['positions'].get(a)
     if not p:return None
-    price=float(info.get('price') or 0); r=cfg['risk']; p['high']=max(p.get('high',p['entry']),price)
+    price=float(info.get('price') or 0); r=cfg['risk']; p['last_price']=price; p['high']=max(p.get('high',p['entry']),price)
     t=info.get('technical') or {}; atr=float(t.get('atr_pct') or 0)
     if atr>0: p['stop_price']=max(float(p.get('stop_price') or 0),price*(1-float(r.get('atr_stop_multiplier',1.5))*atr/100)) if price>p['entry'] else float(p.get('stop_price') or p['entry']*(1-float(r.get('stop_loss_pct',8))/100))
     if price<=float(p.get('stop_price') or p['entry']*(1-float(r.get('stop_loss_pct',8))/100)): return risk_sell(st,cfg,a,price,'smart-stop')[0]
@@ -990,7 +1030,7 @@ class Bot:
             if not ADDR_RE.match(a) or a.lower() in configured_addrs or a.lower() in seen: continue
             clean.append({'name':str(x.get('name','TOKEN')).upper(),'address':a}); seen.add(a.lower())
         self.st['manual_watchlist']=clean[:cap]; self.st['watchlist']=configured
-        self.st['version']='5.11.1'; self.st['state_schema']='5.11.1'
+        self.st['version']='5.12.0'; self.st['state_schema']='5.12.0'
         for k,v in {'entry_cooldowns':{},'last_alert':{},'signal_active':{},'signal_last_score':{},'signal_setup':{},'opportunity_queue':{},'settings_overrides':{},'deep_cursor':0,'priority_cursor':0,'blockscout_token_cursor':None,'scan_cycle':0,'opportunity_alerts':{},'last_opportunity_digest':0,'early_listing_watch':[]}.items(): self.st.setdefault(k,v)
     def save(self): atomic_json(self.state_path,self.st)
 
@@ -1197,7 +1237,10 @@ class Bot:
             open_priority=[]
             for a,p in self.st.get('demo',{}).get('positions',{}).items():
                 if not str(a).strip(): continue
-                open_priority.append({'name':str(p.get('name','TOKEN')).upper(),'address':str(a),'_priority':2000})
+                open_priority.append({'name':str(p.get('name','TOKEN')).upper(),'address':str(a),
+                                  'chain_id':p.get('chain_id') or CHAIN,
+                                  'asset_class':p.get('asset_class') or 'crypto',
+                                  '_priority':2000})
 
             budget_left=max(0,deep_n-len(open_priority))
             remaining=budget_left
@@ -1323,7 +1366,14 @@ class Bot:
                     sig['signal']='CONFIRMED' if confirmed else None
                     tr=manage_position(self.st,self.cfg,sig)
                     if tr: sig['demo_exit']=tr; telegram_messages.append(f"📉 DEMO EXIT | {sig.get('name')} | {tr.get('reason')} | PnL ${tr.get('pnl',0):+.4f} ({tr.get('pnl_pct',0):+.2f}%)")
-                    if confirmed and key not in self.st['demo']['positions']:
+                    # Respect the per-asset Demo auto-entry switch. Gold is
+                    # deliberately observation-only by default; crypto entries
+                    # continue to follow the normal confirmed-signal path.
+                    auto_demo_allowed = True
+                    if x.get('asset_class') == 'commodity':
+                        gold_cfg=self.cfg.get('macro_markets',{}).get('gold',{})
+                        auto_demo_allowed=bool(gold_cfg.get('auto_demo_buy',False))
+                    if confirmed and auto_demo_allowed and key not in self.st['demo']['positions']:
                         tid,why=risk_buy(self.st,self.cfg,sig,None); sig['demo_entry']=tid or why
                     # Early-listing lane: Demo-only automatic entry using dedicated fresh-pair filters.
                     # Known hard concentration limits still veto an early entry. Holder count itself
@@ -1508,7 +1558,7 @@ class Bot:
 
     def telegram_status_text(self):
         d=self.st['demo']; positions=self.st['demo'].get('positions',{})
-        return (f"🤖 Global Multi-Asset Bot V5.11.1\n\n"
+        return (f"🤖 Global Multi-Asset Bot V5.12.0 FINAL\n\n"
                 f"Mode: DEMO\n"
                 f"Scanner: every {self.cfg['scanner']['interval_seconds']}s\n"
                 f"Last scan universe: {self.st.get('last_scan_universe',{}).get('count',0)} token(s)\n"
@@ -1570,7 +1620,7 @@ class Bot:
     def telegram_text(self,txt):
         txt=txt.strip()
         if txt in ('/start','/menu'):
-            return '🤖 Global Multi-Asset Bot V5.11.1\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
+            return '🤖 Global Multi-Asset Bot V5.12.0 FINAL\n\nپنل کنترل آماده است. از دکمه‌های زیر استفاده کن.'
         if txt=='/help': return self.telegram_help_text()
         if txt=='/status': return self.telegram_status_text()
         if txt=='/demo': return f"{self.demo_text()}\n\n{self.telegram_positions_text()}"
@@ -1642,7 +1692,7 @@ class Bot:
                 self.st['manual_watchlist']=old; self.save()
         if txt=='/settings':
             f=self.cfg['filters']; r=self.cfg['risk']; sc=self.cfg['score']; sg=self.cfg['signal']; d=self.cfg['discovery']; e=self.cfg['early_listing']; data=self.cfg['data']
-            return (f"⚙️ SETTINGS V5.11.1\n\n"
+            return (f"⚙️ SETTINGS V5.12.0 FINAL\n\n"
                 f"📌 FILTERS\nMC {f['min_market_cap']:,.0f}-{f['max_market_cap']:,.0f} | Liq {f['min_liquidity']:,.0f} | Vol {f['min_volume_24h']:,.0f} | Holders {f['min_holders']}\n"
                 f"Top10 {f['max_top10_pct']} / hard {f.get('top10_hard_limit')} | Largest {f['max_largest_holder_pct']} / hard {f.get('largest_holder_hard_limit')}\n"
                 f"B/S {f['min_buy_sell_ratio']} | 1H max {f['max_1h_change']} | 4H min {f['min_4h_change']} | Liq/MC {f['min_liquidity_mc_pct']} | hard liq {f.get('hard_min_liquidity')}\n\n"
@@ -1746,7 +1796,7 @@ class Bot:
 def main():
     import argparse
     ap=argparse.ArgumentParser(); ap.add_argument('--config',default='config.json'); ap.add_argument('--state',default='state.json'); ap.add_argument('--once',action='store_true'); ap.add_argument('--telegram',action='store_true'); ap.add_argument('--self-test',action='store_true'); args=ap.parse_args()
-    if args.self_test: print('Use 47_TESTS.py'); return
+    if args.self_test: print('Run the bundled regression tests from the project package.'); return
     b=Bot(args.config,args.state)
     if args.telegram: b.telegram_loop(); return
     if args.once:
