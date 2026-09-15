@@ -1,13 +1,13 @@
-name: Robinhood Chain Free Runner
+name: Robinhood Chain FINAL Runner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
 
 concurrency:
   group: robinhood-chain-scanner
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -55,6 +55,7 @@ jobs:
           python 50_TESTS.py
           python 50_EARLY_DISCOVERY_TESTS.py
           python 51_TELEGRAM_NOISE_TESTS.py
+          python 52_FINAL_COMPLETION_TESTS.py
 
       - name: Run scanner
         working-directory: bot
