@@ -1,0 +1,55 @@
+name: Telegram API Diagnostic
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-api-diagnostic
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check Telegram API
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+
+          echo "=== Telegram getMe ==="
+          curl -sS -w "\nHTTP_STATUS=%{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+
+          echo
+          echo "=== Telegram getWebhookInfo ==="
+          curl -sS -w "\nHTTP_STATUS=%{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+
+          echo
+          echo "=== Telegram getUpdates ==="
+          curl -sS -w "\nHTTP_STATUS=%{http_code}\n" \
+            --get \
+            --data-urlencode "timeout=1" \
+            --data-urlencode "allowed_updates=[\"message\",\"callback_query\"]" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates"
+
+          echo
+          echo "=== Configuration check ==="
+          if [ -n "${TELEGRAM_BOT_TOKEN}" ]; then
+            echo "TELEGRAM_BOT_TOKEN: PRESENT"
+          else
+            echo "TELEGRAM_BOT_TOKEN: MISSING"
+          fi
+
+          if [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            echo "TELEGRAM_CHAT_ID: PRESENT"
+          else
+            echo "TELEGRAM_CHAT_ID: MISSING"
+          fi
