@@ -1,0 +1,112 @@
+name: Telegram Connection Test
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-connection-test
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Test Telegram API
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+          import urllib.parse
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+          if not token:
+              print("TELEGRAM_BOT_TOKEN: MISSING")
+              raise SystemExit(1)
+
+          if not chat_id:
+              print("TELEGRAM_CHAT_ID: MISSING")
+              raise SystemExit(1)
+
+          print("TELEGRAM_BOT_TOKEN: PRESENT")
+          print("TELEGRAM_CHAT_ID: PRESENT")
+
+          base = f"https://api.telegram.org/bot{token}"
+
+          def call(method, params=None):
+              data = None
+              if params:
+                  data = urllib.parse.urlencode(params).encode()
+              req = urllib.request.Request(
+                  base + "/" + method,
+                  data=data,
+                  headers={"User-Agent": "RH-Telegram-Test/1.0"}
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      return r.status, json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode(errors="replace")
+                  try:
+                      result = json.loads(raw)
+                  except Exception:
+                      result = {"ok": False, "description": raw[:200]}
+                  return e.code, result
+
+          status, result = call("getMe")
+          print(f"GETME_HTTP: {status}")
+          print(f"GETME_OK: {result.get('ok')}")
+
+          if result.get("ok"):
+              bot = result.get("result", {})
+              print(f"BOT_USERNAME: @{bot.get('username', '')}")
+              print(f"BOT_ID_PRESENT: {bool(bot.get('id'))}")
+          else:
+              print(f"GETME_ERROR: {str(result.get('description', ''))[:200]}")
+              raise SystemExit(1)
+
+          status, result = call("getWebhookInfo")
+          print(f"WEBHOOK_HTTP: {status}")
+          print(f"WEBHOOK_OK: {result.get('ok')}")
+
+          if result.get("ok"):
+              info = result.get("result", {})
+              print(f"WEBHOOK_SET: {bool(info.get('url', ''))}")
+              print(f"PENDING_UPDATES: {info.get('pending_update_count', 0)}")
+              print(f"LAST_ERROR_PRESENT: {bool(info.get('last_error_message'))}")
+              if info.get("last_error_message"):
+                  print(f"LAST_ERROR: {str(info.get('last_error_message'))[:200]}")
+          else:
+              print(f"WEBHOOK_ERROR: {str(result.get('description', ''))[:200]}")
+
+          status, result = call(
+              "sendMessage",
+              {
+                  "chat_id": chat_id,
+                  "text": "✅ Telegram connection test successful.\n\nThe bot can send messages to this chat."
+              }
+          )
+
+          print(f"SENDMESSAGE_HTTP: {status}")
+          print(f"SENDMESSAGE_OK: {result.get('ok')}")
+
+          if not result.get("ok"):
+              print(f"SENDMESSAGE_ERROR: {str(result.get('description', ''))[:200]}")
+              raise SystemExit(1)
+
+          print("RESULT: OUTBOUND TELEGRAM MESSAGING WORKS")
+          print("NOTE: This test does NOT call getUpdates, so it does not consume /start or other messages.")
+          PY
