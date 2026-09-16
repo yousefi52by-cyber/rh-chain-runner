@@ -1,0 +1,91 @@
+name: Find Telegram Chat ID
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: find-telegram-chat-id
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Read one Telegram update safely
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -e
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          import urllib.error
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+          if not token:
+              print("TELEGRAM_BOT_TOKEN: MISSING")
+              raise SystemExit(1)
+
+          base = f"https://api.telegram.org/bot{token}"
+
+          params = urllib.parse.urlencode({
+              "limit": "20",
+              "timeout": "1"
+          }).encode()
+
+          req = urllib.request.Request(
+              base + "/getUpdates",
+              data=params,
+              headers={"User-Agent": "RH-Telegram-ChatID-Finder/1.0"}
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  status = r.status
+                  data = json.loads(r.read().decode())
+          except urllib.error.HTTPError as e:
+              raw = e.read().decode(errors="replace")
+              try:
+                  data = json.loads(raw)
+              except Exception:
+                  data = {"ok": False, "description": raw[:200]}
+              status = e.code
+
+          print(f"GETUPDATES_HTTP: {status}")
+          print(f"GETUPDATES_OK: {data.get('ok')}")
+
+          if not data.get("ok"):
+              print(f"GETUPDATES_ERROR: {str(data.get('description', ''))[:200]}")
+              raise SystemExit(1)
+
+          updates = data.get("result", [])
+          print(f"UPDATES_RETURNED: {len(updates)}")
+
+          found = set()
+
+          for update in updates:
+              for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+                  obj = update.get(key)
+                  if not isinstance(obj, dict):
+                      continue
+                  chat = obj.get("chat")
+                  if isinstance(chat, dict) and chat.get("id") is not None:
+                      found.add(str(chat["id"]))
+
+          if found:
+              for cid in sorted(found):
+                  print(f"TELEGRAM_CHAT_ID_FOUND: {cid}")
+          else:
+              print("TELEGRAM_CHAT_ID_FOUND: NONE")
+              print("Send /start to the bot in Telegram, then run this workflow again.")
+
+          print("SECURITY: message text and bot token were not printed.")
+          PY
