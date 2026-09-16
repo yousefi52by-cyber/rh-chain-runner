@@ -1,0 +1,115 @@
+name: Telegram API Diagnostic
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-api-diagnostic
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check Telegram API safely
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -e
+
+          echo "=== Configuration ==="
+          if [ -n "${TELEGRAM_BOT_TOKEN}" ]; then
+            echo "TELEGRAM_BOT_TOKEN: PRESENT"
+          else
+            echo "TELEGRAM_BOT_TOKEN: MISSING"
+          fi
+
+          if [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            echo "TELEGRAM_CHAT_ID: PRESENT"
+          else
+            echo "TELEGRAM_CHAT_ID: MISSING"
+          fi
+
+          echo
+          echo "=== getMe ==="
+          curl -sS \
+            -o /tmp/getme.json \
+            -w "HTTP_STATUS=%{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"
+
+          python - <<'PY'
+          import json
+          p="/tmp/getme.json"
+          try:
+              d=json.load(open(p))
+              print("ok:", d.get("ok"))
+              r=d.get("result") or {}
+              print("bot_username:", r.get("username",""))
+              print("bot_id_present:", bool(r.get("id")))
+              print("error_code:", d.get("error_code"))
+              print("description:", d.get("description",""))
+          except Exception as e:
+              print("RESPONSE_PARSE_ERROR:", e)
+          PY
+
+          echo
+          echo "=== getWebhookInfo ==="
+          curl -sS \
+            -o /tmp/webhook.json \
+            -w "HTTP_STATUS=%{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+
+          python - <<'PY'
+          import json
+          p="/tmp/webhook.json"
+          try:
+              d=json.load(open(p))
+              print("ok:", d.get("ok"))
+              r=d.get("result") or {}
+              url=r.get("url","")
+              print("webhook_url_set:", bool(url))
+              print("pending_update_count:", r.get("pending_update_count"))
+              print("last_error_date_present:", bool(r.get("last_error_date")))
+              print("last_error_message_present:", bool(r.get("last_error_message")))
+              if d.get("error_code"):
+                  print("error_code:", d.get("error_code"))
+                  print("description:", d.get("description",""))
+          except Exception as e:
+              print("RESPONSE_PARSE_ERROR:", e)
+          PY
+
+          echo
+          echo "=== getUpdates ==="
+          curl -sS \
+            -o /tmp/updates.json \
+            -w "HTTP_STATUS=%{http_code}\n" \
+            --get \
+            --data-urlencode "timeout=1" \
+            --data-urlencode 'allowed_updates=["message","callback_query"]' \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates"
+
+          python - <<'PY'
+          import json
+          p="/tmp/updates.json"
+          try:
+              d=json.load(open(p))
+              print("ok:", d.get("ok"))
+              if d.get("ok"):
+                  updates=d.get("result") or []
+                  print("updates_returned:", len(updates))
+                  print("update_ids:", [x.get("update_id") for x in updates])
+              else:
+                  print("error_code:", d.get("error_code"))
+                  print("description:", d.get("description",""))
+          except Exception as e:
+              print("RESPONSE_PARSE_ERROR:", e)
+
+          print()
+          print("DIAGNOSTIC_COMPLETE")
+          PY
